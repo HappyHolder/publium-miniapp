@@ -60,8 +60,6 @@ services:
       MINI_APP_URL: https://${DOMAIN}
       ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS}
       # AI text
-      AI_PROVIDER: ${AI_PROVIDER}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       # Direct OpenAI — REQUIRED. Every text, vision, transcription and cover path
       # runs on this key with no second provider. ASSISTANT_PROVIDER is gone: the
       # assistant takes the native tool-calling path whenever the key is present.

@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import crypto from 'crypto';
 import multer from 'multer';
 import { prisma } from '../db';
@@ -206,9 +207,9 @@ router.post('/styles/upsert', async (req: Request, res: Response): Promise<void>
   if (!strOrNull(style.nameRu) || !strOrNull(style.nameEn)) { res.status(400).json({ error: 'nameRu and nameEn are required' }); return; }
 
   const priceKind = VALID_PRICE_KINDS.includes(style.priceKind ?? '') ? style.priceKind! : 'FREE';
-  const priceStars = priceKind === 'PAID' && Number.isInteger(Number(style.priceStars)) && Number(style.priceStars) > 0 ? Number(style.priceStars) : null;
-  const priceGram  = priceKind === 'PAID' && Number(style.priceGram) > 0 ? Number(style.priceGram) : null;
-  if (priceKind === 'PAID' && !priceStars && !priceGram) { res.status(400).json({ error: 'A PAID style needs priceStars and/or priceGram' }); return; }
+  const priceStars = null; // legacy column; new purchases use TON only
+  const priceGram = priceKind === 'PAID' && Number.isFinite(Number(style.priceGram)) && Number(style.priceGram) > 0 ? Number(style.priceGram) : null;
+  if (priceKind === 'PAID' && !priceGram) { res.status(400).json({ error: 'A PAID style needs a TON price' }); return; }
 
   const data = {
     slug,

@@ -1,16 +1,16 @@
+import { tonCheckout } from '@/lib/tonCheckout'
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { Check, Image, Loader2, MessageCircle, ShieldCheck, Sparkles, Ticket, Users, WandSparkles } from 'lucide-react'
 import { useTonConnectUI } from '@tonconnect/ui-react'
-import { beginCell } from '@ton/core'
 import { useApp } from '@/context/AppContext'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { Sheet } from '@/components/ui/Sheet'
 import { GramMark } from '@/components/icons/GramMark'
-import { getTelegramInitData, getTelegramUserId, openTelegramInvoice } from '@/lib/telegram'
+import { getTelegramInitData } from '@/lib/telegram'
 import { API_BASE } from '@/lib/api'
-import { PLAN_PRICING, TON_RECEIVING_WALLET, tierToServer, tonToNano } from '@/lib/payments'
+import { PLAN_PRICING, tierToServer } from '@/lib/payments'
 import { PLAN_NAMES, SUBSCRIPTION_LIMITS } from '@/lib/subscriptionCatalog'
 import type { PlanTier, Subscription } from '@/types'
 
@@ -57,50 +57,14 @@ export function PlansScreen({ onBack }: PlansScreenProps) {
   const [payTier, setPayTier] = useState<PaidTier | null>(null)
   const [paying, setPaying] = useState(false)
 
-  const refreshSubscription = async () => {
-    const initData = getTelegramInitData()
-    if (!initData) return
-    const response = await fetch(`${API_BASE}/api/payments/subscription`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData }) })
-    const data = await response.json().catch(() => ({})) as { subscription?: ServerSubscription }
-    if (data.subscription) applyServerSubscription(data.subscription)
-  }
-
-  const payWithStars = async (tier: PaidTier) => {
-    if (paying) return
-    const initData = getTelegramInitData()
-    if (!initData) { showToast('Оплата доступна внутри Telegram.', 'error'); return }
-    setPaying(true)
-    try {
-      const response = await fetch(`${API_BASE}/api/payments/stars/create-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, tier: tierToServer(tier) }) })
-      const data = await response.json().catch(() => ({})) as { invoiceUrl?: string; error?: string }
-      if (!response.ok || !data.invoiceUrl) throw new Error(data.error ?? 'Не удалось создать счёт')
-      const opened = openTelegramInvoice(data.invoiceUrl, async (status: string) => {
-        setPaying(false)
-        if (status === 'paid') { await refreshSubscription(); setPayTier(null); showToast('Подписка активирована') }
-      })
-      if (!opened) throw new Error('Не удалось открыть счёт Telegram')
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Ошибка оплаты', 'error')
-      setPaying(false)
-    }
-  }
-
   const payWithTon = async (tier: PaidTier) => {
     if (paying) return
     const initData = getTelegramInitData()
     if (!initData) { showToast('Оплата доступна внутри Telegram.', 'error'); return }
     if (!tonConnectUI.account) { await tonConnectUI.openModal().catch(() => undefined); showToast('Подключите кошелёк и нажмите оплатить ещё раз'); return }
-    const uid = getTelegramUserId()
-    if (!uid) return
     setPaying(true)
     try {
-      const payload = beginCell().storeUint(0, 32).storeStringTail(uid).endCell().toBoc().toString('base64')
-      await tonConnectUI.sendTransaction({ validUntil: Math.floor(Date.now() / 1000) + 600, messages: [{ address: TON_RECEIVING_WALLET, amount: tonToNano(PLAN_PRICING[tier].ton), payload }] })
-      const senderWallet = tonConnectUI.account?.address
-      if (!senderWallet) throw new Error('Кошелёк не подключён')
-      const response = await fetch(`${API_BASE}/api/payments/ton/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, tier: tierToServer(tier), senderWallet }) })
-      const data = await response.json().catch(() => ({})) as { subscription?: ServerSubscription; error?: string }
-      if (!response.ok || !data.subscription) throw new Error(data.error ?? 'Платёж пока не найден')
+      const data = await tonCheckout(tonConnectUI, 'subscription', tierToServer(tier))
       applyServerSubscription(data.subscription)
       setPayTier(null)
       showToast('Подписка активирована')
@@ -175,10 +139,9 @@ export function PlansScreen({ onBack }: PlansScreenProps) {
             <div><p className="text-xs font-medium text-[#A1A1AA]">Стоимость тарифа</p><p className="mt-1 text-[26px] font-bold leading-none text-white">{formatUsd(PLAN_PRICING[payTier].usd)}</p></div>
             <span className="rounded-full border border-white/[0.09] bg-black/20 px-2.5 py-1 text-[11px] font-medium text-[#B8B8C0]">30 дней</span>
           </div>
-          <p className="mt-3 text-xs leading-5 text-[#777780]">Оплата производится в Telegram Stars или Gram. Лимиты обновляются ежемесячно, а оставшиеся оплаченные дни сохраняются при продлении.</p>
+          <p className="mt-3 text-xs leading-5 text-[#777780]">Оплата производится в TON. Лимиты обновляются ежемесячно, а оставшиеся оплаченные дни сохраняются при продлении.</p>
         </div>
-        <button disabled={paying} onClick={() => void payWithStars(payTier)} className="flex min-h-[54px] w-full items-center justify-between rounded-2xl border border-white/[0.09] bg-white/[0.045] px-4 text-white transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6A00] disabled:opacity-50"><span className="font-semibold">Telegram Stars</span><span className="font-bold">{format(PLAN_PRICING[payTier].stars)} ⭐</span></button>
-        <button disabled={paying} onClick={() => void payWithTon(payTier)} className="flex min-h-[54px] w-full items-center justify-between rounded-2xl border border-[#0098EA]/20 bg-[#0098EA]/[0.08] px-4 text-white transition-colors hover:bg-[#0098EA]/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0098EA] disabled:opacity-50"><span className="flex items-center gap-2 font-semibold"><GramMark size={18} /> Gram</span><span className="font-bold">{PLAN_PRICING[payTier].ton} Gram</span></button>
+        <button disabled={paying} onClick={() => void payWithTon(payTier)} className="flex min-h-[54px] w-full items-center justify-between rounded-2xl border border-[#0098EA]/20 bg-[#0098EA]/[0.08] px-4 text-white transition-colors hover:bg-[#0098EA]/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0098EA] disabled:opacity-50"><span className="flex items-center gap-2 font-semibold"><GramMark size={18} /> TON</span><span className="font-bold">{PLAN_PRICING[payTier].ton} TON</span></button>
         {paying && <div className="flex items-center justify-center gap-2 py-2 text-xs text-[#8C8C96]"><Loader2 size={15} className="animate-spin" /> Проверяем оплату…</div>}
       </div>}
     </Sheet>

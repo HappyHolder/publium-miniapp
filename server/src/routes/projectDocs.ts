@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import multer from 'multer';
 import { prisma } from '../db';
 import { env } from '../env';

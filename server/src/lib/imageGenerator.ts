@@ -1,3 +1,4 @@
+import { publicFetch } from './publicFetch';
 /**
  * imageGenerator.ts
  *
@@ -396,7 +397,7 @@ async function renderHeadline(
 
 /** Fetches an image URL into a Buffer. Throws on failure (callers handle it). */
 async function downloadImage(url: string): Promise<Buffer> {
-  return fetch(url).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
+  return publicFetch(url).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
 }
 
 /** Uploads a composited cover JPEG to Blob and returns its public URL. */

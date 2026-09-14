@@ -1,16 +1,14 @@
+import { tonCheckout } from '@/lib/tonCheckout'
 import { useState } from 'react'
-import { Check, Loader2, Star, Sparkles } from 'lucide-react'
+import { Check, Loader2, Sparkles } from 'lucide-react'
 import { useTonConnectUI } from '@tonconnect/ui-react'
-import { beginCell } from '@ton/core'
 import { GramMark } from '@/components/icons/GramMark'
 import { Sheet } from '@/components/ui/Sheet'
 import { Button } from '@/components/ui/Button'
 import { useApp } from '@/context/AppContext'
 import { channelLabel } from '@/lib/utils'
-import { getTelegramUserId, openTelegramInvoice } from '@/lib/telegram'
-import { TON_RECEIVING_WALLET, tonToNano } from '@/lib/payments'
 import {
-  createStyleStarsInvoice, verifyStyleTon, isStyleOwned, applyStyleToVisualKit,
+  fetchStyles, isStyleOwned, applyStyleToVisualKit,
 } from '@/lib/styles'
 import type { MarketStyle, VisualKit } from '@/types'
 
@@ -30,7 +28,7 @@ const EMPTY_VISUAL_KIT: VisualKit = {
 export function StyleDetailSheet({ style, owned, onClose, onPurchased }: StyleDetailSheetProps) {
   const { state, activeChannel, updateBrandKit, showToast, language, t } = useApp()
   const [tonConnectUI] = useTonConnectUI()
-  const [busy, setBusy] = useState<null | 'stars' | 'gram' | 'apply'>(null)
+  const [busy, setBusy] = useState<null | 'gram' | 'apply'>(null)
 
   const isRu = language === 'ru'
   if (!style) return null
@@ -53,32 +51,17 @@ export function StyleDetailSheet({ style, owned, onClose, onPurchased }: StyleDe
     : t('styles.modeHtml')
 
   // ── Apply ──────────────────────────────────────────────────────────────────
-  const handleApply = () => {
+  const handleApply = async () => {
     if (!activeChannel) { showToast(t('styles.needChannel'), 'error'); return }
     setBusy('apply')
     try {
+      const fresh = (await fetchStyles()).styles.find(item => item.id === style.id) ?? style
       const current = state.brandKits.find(k => k.channelId === activeChannel.id)?.visualKit ?? EMPTY_VISUAL_KIT
-      updateBrandKit(activeChannel.id, { visualKit: applyStyleToVisualKit(style, current) })
+      const saved = await updateBrandKit(activeChannel.id, { visualKit: applyStyleToVisualKit(fresh, current) })
+      if (!saved) return
       showToast(t('styles.applyDone'))
       onClose()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  // ── Buy with Stars ───────────────────────────────────────────────────────────
-  const handleBuyStars = async () => {
-    if (busy) return
-    setBusy('stars')
-    try {
-      const invoiceUrl = await createStyleStarsInvoice(style.id)
-      const opened = openTelegramInvoice(invoiceUrl, (status: string) => {
-        setBusy(null)
-        if (status === 'paid') { onPurchased(style.id); showToast(t('styles.purchaseDone')) }
-      })
-      if (!opened) { showToast(t('plans.payStarsOnly'), 'error'); setBusy(null) }
-    } catch (err) {
-      showToast((err as Error).message || t('plans.payFailed'), 'error')
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Не удалось применить стиль', 'error') } finally {
       setBusy(null)
     }
   }
@@ -91,19 +74,9 @@ export function StyleDetailSheet({ style, owned, onClose, onPurchased }: StyleDe
       showToast(t('plans.connectWalletFirst'))
       return
     }
-    const uid = getTelegramUserId()
-    if (!uid) { showToast(t('plans.payStarsOnly'), 'error'); return }
     setBusy('gram')
     try {
-      const commentPayload = beginCell().storeUint(0, 32).storeStringTail(uid).endCell().toBoc().toString('base64')
-      await tonConnectUI.sendTransaction({
-        validUntil: Math.floor(Date.now() / 1000) + 600,
-        messages: [{ address: TON_RECEIVING_WALLET, amount: tonToNano(style.priceGram ?? 0), payload: commentPayload }],
-      })
-      const sender = tonConnectUI.account?.address
-      if (!sender) { showToast(t('plans.payFailed'), 'error'); setBusy(null); return }
-      showToast(t('plans.payTonChecking'))
-      await verifyStyleTon(style.id, sender)
+      await tonCheckout(tonConnectUI, 'style', style.id)
       onPurchased(style.id)
       showToast(t('styles.purchaseDone'))
     } catch (err) {
@@ -219,19 +192,6 @@ export function StyleDetailSheet({ style, owned, onClose, onPurchased }: StyleDe
           </Button>
         ) : (
           <>
-            {style.priceStars != null && style.priceStars > 0 && (
-              <button
-                onClick={handleBuyStars}
-                disabled={!!busy}
-                className="w-full flex items-center justify-between px-4 py-3.5 rounded-[14px] bg-white/[0.04] border border-white/[0.07] hover:bg-white/[0.07] transition-colors disabled:opacity-50"
-              >
-                <span className="flex items-center gap-2.5">
-                  {busy === 'stars' ? <Loader2 size={18} className="text-[#FF6A00] animate-spin" /> : <Star size={18} className="text-[#FF6A00]" fill="#FF6A00" />}
-                  <span className="text-[14px] font-medium text-white">Telegram Stars</span>
-                </span>
-                <span className="text-[14px] font-bold text-white">{style.priceStars} ⭐</span>
-              </button>
-            )}
             {style.priceGram != null && style.priceGram > 0 && (
               <button
                 onClick={handleBuyGram}
@@ -240,9 +200,9 @@ export function StyleDetailSheet({ style, owned, onClose, onPurchased }: StyleDe
               >
                 <span className="flex items-center gap-2.5">
                   {busy === 'gram' ? <Loader2 size={18} className="text-[#FF6A00] animate-spin" /> : <GramMark size={18} />}
-                  <span className="text-[14px] font-medium text-white">Gram</span>
+                  <span className="text-[14px] font-medium text-white">TON</span>
                 </span>
-                <span className="text-[14px] font-bold text-white">{style.priceGram} Gram</span>
+                <span className="text-[14px] font-bold text-white">{style.priceGram} TON</span>
               </button>
             )}
             <p className="text-center text-[11px] text-[#55555D] pt-0.5 flex items-center justify-center gap-1">

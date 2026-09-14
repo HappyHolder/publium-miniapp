@@ -17,7 +17,6 @@ export function serializeStyle(s: Style) {
     descEn:           s.descEn,
     tags:             s.tags,
     priceKind:        s.priceKind,                 // "FREE" | "PAID"
-    priceStars:       s.priceStars ?? null,
     priceGram:        s.priceGram ?? null,
     brandAdaptive:    s.brandAdaptive,
     recommendedMode:  s.recommendedMode,           // "html" | "ai" | "ai_html"

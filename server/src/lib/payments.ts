@@ -2,13 +2,13 @@ import type { PlanTier, Prisma, Subscription } from '@prisma/client';
 import { prisma } from '../db';
 import { serializeSubscription } from './subscriptionLimits';
 
-export interface PlanPrice { usd: number; stars: number; ton: number }
+export interface PlanPrice { usd: number; ton: number }
 
 // Provisional unified prices. LOW/HIGH no longer exists; this is the only catalogue.
 export const PLAN_PRICING: Record<Exclude<PlanTier, 'FREE'>, PlanPrice> = {
-  STARTER: { usd: 30, stars: 2_310, ton: 20 },
-  CREATOR: { usd: 60, stars: 4_620, ton: 40 },
-  STUDIO_PRO: { usd: 250, stars: 19_240, ton: 167 },
+  STARTER: { usd: 30, ton: 20 },
+  CREATOR: { usd: 60, ton: 40 },
+  STUDIO_PRO: { usd: 250, ton: 167 },
 };
 
 export const GRANT_DURATION_DAYS = 30;

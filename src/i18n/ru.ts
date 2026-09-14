@@ -152,7 +152,6 @@ export const ru: Dict = {
     promoConnError:     'Ошибка соединения',
     choosePayment:      'Способ оплаты',
     payForDays:         'на 30 дней',
-    payStarsOnly:       'Оплата Stars доступна только в Telegram',
     paySuccess:         'Оплата прошла! Тариф обновлён.',
     payTonChecking:     'Платёж отправлен, проверяем… это занимает до минуты.',
     payFailed:          'Оплата не прошла',
@@ -163,7 +162,7 @@ export const ru: Dict = {
     videoGenerationSoon: 'Генерация видео — soon',
     upgradeToPremium:   'Перейти на Премиум',
     underHood:          'Под капотом',
-    footer:             'Оплата через Telegram Stars или Gram · подписка на 30 дней',
+    footer:             'Оплата через TON · подписка на 30 дней',
   },
   posts: {
     tabs: {

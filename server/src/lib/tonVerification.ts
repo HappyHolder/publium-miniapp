@@ -80,10 +80,13 @@ export async function verifyTonDeposit(opts: {
    * someone else's incoming transaction by supplying their wallet address.
    */
   expectedComment?: string;
+  fromDate?: Date;
+  untilDate?: Date;
 }): Promise<VerifyResult> {
   const { expectedTon, senderWallet, receivingWallet, apiKey, isHashUsed, expectedComment } = opts;
   const expectedNano = BigInt(Math.round(expectedTon * 1e9));
-  const since = Math.floor(Date.now() / 1000) - MATCH_WINDOW_SEC;
+  const since = opts.fromDate ? Math.floor(opts.fromDate.getTime() / 1000) - 30 : Math.floor(Date.now() / 1000) - MATCH_WINDOW_SEC;
+  const until = opts.untilDate ? Math.floor(opts.untilDate.getTime() / 1000) : Infinity;
 
   for (let attempt = 1; attempt <= RETRY_COUNT; attempt++) {
     const controller = new AbortController();
@@ -92,7 +95,7 @@ export async function verifyTonDeposit(opts: {
       const url =
         `${TONCENTER_BASE}/transactions` +
         `?account=${encodeURIComponent(receivingWallet)}` +
-        `&limit=30&sort=desc` +
+        `&start_utime=${since}&end_utime=${Number.isFinite(until) ? until : Math.floor(Date.now() / 1000)}&limit=1000&sort=desc` +
         `&api_key=${encodeURIComponent(apiKey)}`;
 
       const res = await fetch(url, { signal: controller.signal });
@@ -107,7 +110,7 @@ export async function verifyTonDeposit(opts: {
       const txs = Array.isArray(data.transactions) ? data.transactions : [];
 
       for (const tx of txs) {
-        if ((tx.now || 0) < since) continue;
+        if ((tx.now || 0) < since || (tx.now || 0) > until) continue;
         const inMsg = tx.in_msg;
         if (!inMsg) continue;
         if (!addressesMatch(inMsg.source ?? '', senderWallet)) continue;
@@ -115,8 +118,8 @@ export async function verifyTonDeposit(opts: {
         // Bind the deposit to the paying user: the transfer must carry their
         // Telegram id as a text comment, otherwise it is not their payment.
         if (expectedComment && extractComment(inMsg) !== expectedComment) continue;
-        const txHash = tx.hash;
-        if (!txHash) continue;
+        const txHash = tx.hash ? Buffer.from(tx.hash.replace(/-/g, '+').replace(/_/g, '/'), /^[a-f0-9]{64}$/i.test(tx.hash) ? 'hex' : 'base64').toString('hex') : null;
+        if (!txHash || !/^[a-f0-9]{64}$/.test(txHash)) continue;
         if (await isHashUsed(txHash)) continue;
         return { ok: true, txHash, actualTon: Number(BigInt(inMsg.value || '0')) / 1e9 };
       }

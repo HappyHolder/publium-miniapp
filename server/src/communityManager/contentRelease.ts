@@ -55,11 +55,12 @@ async function mergeRelease(managerId:string,channelMessageId:number,patch:Conte
 }
 
 export async function queuePublishedPostContentSupport(postId:string){
-  const post=await prisma.generatedPost.findUnique({where:{id:postId},include:{channel:{include:{community:{include:{communityManager:true}}}},variants:{select:{id:true,text:true}}}});
-  const manager=post?.channel.community?.communityManager;
-  if(!post||!manager||!post.tgMessageId||!post.publishedAt)return null;
+  const post=await prisma.generatedPost.findUnique({where:{id:postId},include:{variants:true}});
+  if(!post?.tgMessageId||!post.publishedAt)return null;
+  const links=await prisma.channelChatLink.findMany({where:{channelId:post.channelId,isPrimary:true},include:{chat:{include:{community:{include:{communityManager:true}}}}}});
   const text=post.variants.find(item=>item.id===post.selectedVariantId)?.text??post.variants[0]?.text??'';
-  return mergeRelease(manager.id,post.tgMessageId,{postId:post.id,channelId:post.channelId,postText:text.slice(0,12000),sourceUrl:post.sourceUrl??undefined,publishedAt:post.publishedAt.toISOString()},post.title);
+  for(const link of links){const manager=link.chat.community?.communityManager;if(manager)await mergeRelease(manager.id,post.tgMessageId,{postId:post.id,channelId:post.channelId,postText:text.slice(0,12000),sourceUrl:post.sourceUrl??undefined,publishedAt:post.publishedAt.toISOString()},post.title);}
+  return null;
 }
 
 export async function captureAutomaticChannelPost(managerId:string,input:{channelId?:string;channelMessageId:number;discussionChatId:string;discussionMessageId:number;text:string;publishedAt:Date}){

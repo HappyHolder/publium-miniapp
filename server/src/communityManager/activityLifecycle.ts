@@ -1,3 +1,4 @@
+import { hydrateLinkedChannel } from './channelContext';
 import { prisma } from '../db';
 import { primaryTextModel } from '../lib/assistantModel';
 import { sendBotMessage } from '../lib/telegramBot';
@@ -17,6 +18,7 @@ export async function advanceActiveActivities(now=new Date()){
     const claim=await prisma.communityManagerActivity.updateMany({where:{id:activity.id,status:'ACTIVE',scheduledAt:{lte:now}},data:{status:'PROCESSING'}});if(!claim.count)continue;
     let reserved=false,sent=false;
     try{
+      await hydrateLinkedChannel(activity.communityManager.community);
       const manager=activity.communityManager,state=stateOf(activity.result),endsAt=state.endsAt?new Date(state.endsAt):null,ownerUserId=manager.community.chat?.userId??manager.community.channel?.userId,channelName=manager.community.chat?.title??manager.community.channel?.name??'сообщество';
       if(!manager.enabled||!manager.publishedVersion||!manager.community.moderatorChat||!endsAt){await prisma.communityManagerActivity.update({where:{id:activity.id},data:{status:'CANCELLED'}});continue}
       const row=await prisma.communityManagerConfig.findUnique({where:{communityManagerId_version:{communityManagerId:manager.id,version:manager.publishedVersion}}});if(!row){await prisma.communityManagerActivity.update({where:{id:activity.id},data:{status:'CANCELLED',lastError:'Config not applied'}});continue}

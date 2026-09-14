@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { prisma } from '../db';
+import { storageOwner } from './storageContext';
 /**
  * storage.ts
  *
@@ -41,7 +44,9 @@ export async function putObject(
   _opts?: { contentType?: string },
 ): Promise<PutResult> {
   // Normalize: strip leading slashes and reject path traversal.
-  const clean = pathname.replace(/^\/+/, '');
+  const original = pathname.replace(/^\/+/, '');
+  if (original.includes('..') || original.includes('\\') || original.includes(':')) throw new Error('Illegal storage path');
+  const clean = path.posix.join(path.posix.dirname(original), `${randomUUID()}-${path.posix.basename(original)}`);
   if (clean.includes('..')) {
     throw new Error(`[storage] Illegal pathname (path traversal): ${pathname}`);
   }
@@ -50,6 +55,7 @@ export async function putObject(
   await fs.mkdir(path.dirname(dest), { recursive: true });
   await fs.writeFile(dest, data);
 
+  await prisma.storedAsset.create({ data: { pathname: clean, ownerUserId: storageOwner.getStore() ?? null } });
   const base = env.PUBLIC_BASE_URL.replace(/\/+$/, '');
   return { url: `${base}${PUBLIC_PREFIX}/${clean}`, pathname: clean };
 }
@@ -62,12 +68,8 @@ export async function putObject(
 export async function readObject(urlOrPath: string): Promise<Buffer | null> {
   try {
     if (!urlOrPath || typeof urlOrPath !== 'string') return null;
-    const marker = `${PUBLIC_PREFIX}/`;
-    const idx = urlOrPath.indexOf(marker);
-    const rel = (idx >= 0 ? urlOrPath.slice(idx + marker.length) : urlOrPath)
-      .split('?')[0]!
-      .replace(/^\/+/, '');
-    if (!rel || rel.includes('..')) return null;
+    const rel = storagePath(urlOrPath);
+    if (!rel) return null;
 
     const dest = path.resolve(env.STORAGE_DIR, rel);
     const root = path.resolve(env.STORAGE_DIR);
@@ -83,24 +85,36 @@ export async function readObject(urlOrPath: string): Promise<Buffer | null> {
  * Non-fatal and bounded: ignores URLs that aren't ours, rejects path traversal,
  * and never deletes outside STORAGE_DIR. Swallows all errors (best-effort cleanup).
  */
-export async function deleteObject(urlOrPath: string): Promise<void> {
+export function storagePath(value: string): string | null {
   try {
-    if (!urlOrPath || typeof urlOrPath !== 'string') return;
-    // Accept either a full ".../uploads/<path>" URL or a bare storage-relative path.
-    const marker = `${PUBLIC_PREFIX}/`;
-    const idx = urlOrPath.indexOf(marker);
-    const rel = (idx >= 0 ? urlOrPath.slice(idx + marker.length) : urlOrPath)
-      .split('?')[0]!
-      .replace(/^\/+/, '');
-    if (!rel || rel.includes('..')) return;
+    let rel = value;
+    if (/^https?:/i.test(value)) {
+      const url = new URL(value);
+      if (url.origin !== new URL(env.PUBLIC_BASE_URL).origin || !url.pathname.startsWith('/uploads/')) return null;
+      rel = decodeURIComponent(url.pathname.slice('/uploads/'.length));
+    } else if (/^[a-z]+:/i.test(value)) return null;
+    else rel = decodeURIComponent(value.split(/[?#]/)[0]!).replace(/^\/?uploads\//, '');
+    rel = rel.split('?')[0]!.replace(/^\/+/, '');
+    if (!rel || rel.includes('..') || rel.includes('\\') || rel.includes(':') || path.isAbsolute(rel)) return null;
+    return rel;
+  } catch { return null; }
+}
 
-    const dest = path.resolve(env.STORAGE_DIR, rel);
-    const root = path.resolve(env.STORAGE_DIR);
-    if (dest !== root && !dest.startsWith(root + path.sep)) return; // outside storage — refuse
-    await fs.unlink(dest).catch(() => { /* already gone — fine */ });
-  } catch {
-    /* best-effort: never throw from cleanup */
+/** Cleanup requires known ownership and never follows arbitrary URL path fragments.
+ * Legacy files and shared assets remain intact when ownership cannot be proven. */
+export async function deleteObject(urlOrPath: string, ownerUserId = storageOwner.getStore()): Promise<void> {
+  const pathname = storagePath(urlOrPath);
+  if (!pathname || !ownerUserId) return;
+  const asset = await prisma.storedAsset.findUnique({ where: { pathname } });
+  if (!asset || asset.ownerUserId !== ownerUserId) return;
+  // Search every persistent reference, including shared templates and other posts.
+  for (const table of ['BrandKit', 'PostVariant', 'GeneratedPost', 'Style', 'ProjectDoc', 'RoleKnowledgeDoc', 'ChatMessage']) {
+    const encoded = pathname.split('/').map(encodeURIComponent).join('/');
+    const rows = await prisma.$queryRawUnsafe<{ found: boolean }[]>(`SELECT EXISTS (SELECT 1 FROM "${table}" t WHERE strpos(to_jsonb(t)::text, $1) > 0 OR strpos(to_jsonb(t)::text, $2) > 0) AS found`, pathname, encoded);
+    if (rows[0]?.found) return;
   }
+  await fs.unlink(path.resolve(env.STORAGE_DIR, pathname)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  await prisma.storedAsset.deleteMany({ where: { pathname, ownerUserId } });
 }
 
 /**
@@ -124,7 +138,7 @@ export async function purgeOldFiles(subdir: string, maxAgeMs: number): Promise<n
       const full = path.join(dir, entry.name);
       try {
         const stat = await fs.stat(full);
-        if (stat.mtimeMs < cutoff) { await fs.unlink(full).catch(() => undefined); removed++; }
+        if (stat.mtimeMs < cutoff) { const pathname = `${safe}/${entry.name}`; const asset = await prisma.storedAsset.findUnique({ where: { pathname } }); if (asset?.ownerUserId) { await deleteObject(pathname, asset.ownerUserId); removed++; } }
       } catch { /* skip */ }
     }
   } catch { /* dir missing — nothing to do */ }

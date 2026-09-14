@@ -1,3 +1,4 @@
+import { hydrateLinkedChannel } from './channelContext';
 import { prisma } from '../db';
 import { isQuietHour, parseCommunityManagerConfig } from './config';
 import { chooseActivity, intensityWindow, type CommunityActivityType } from './activityDirector';
@@ -102,6 +103,6 @@ async function considerManager(manager:any,now:Date){
 
 export async function sweepCommunityActivities(now=new Date()){
   if(sweeping)return;sweeping=true;
-  try{await advanceActiveActivities(now);await evaluateFinishedActivities(now);await processSilentContentReleases(now);const managers=await prisma.communityManager.findMany({where:{enabled:true,publishedVersion:{not:null}},include:{community:{include:{moderatorChat:true,chat:true,channel:true}}}});for(const manager of managers){await runDueDailyDigest(manager.id,now).catch(async error=>{await prisma.communityManager.update({where:{id:manager.id},data:{lastError:error instanceof Error?error.message.slice(0,500):'Daily digest failed'}}).catch(()=>undefined)});await considerManager(manager,now).catch(async error=>{await prisma.communityManager.update({where:{id:manager.id},data:{lastError:error instanceof Error?error.message.slice(0,500):'Activity scheduler failed'}}).catch(()=>undefined)})}}finally{sweeping=false}
+  try{await advanceActiveActivities(now);await evaluateFinishedActivities(now);await processSilentContentReleases(now);const managers=await prisma.communityManager.findMany({where:{enabled:true,publishedVersion:{not:null}},include:{community:{include:{moderatorChat:true,chat:true,channel:true}}}});for(const manager of managers){await hydrateLinkedChannel(manager.community);await runDueDailyDigest(manager.id,now).catch(async error=>{await prisma.communityManager.update({where:{id:manager.id},data:{lastError:error instanceof Error?error.message.slice(0,500):'Daily digest failed'}}).catch(()=>undefined)});await considerManager(manager,now).catch(async error=>{await prisma.communityManager.update({where:{id:manager.id},data:{lastError:error instanceof Error?error.message.slice(0,500):'Activity scheduler failed'}}).catch(()=>undefined)})}}finally{sweeping=false}
 }
 export function startCommunityActivityScheduler(){if(timer)return;const tick=()=>void sweepCommunityActivities().catch(error=>console.error('[community-activity]',error instanceof Error?error.message:error));setTimeout(tick,20_000+Math.floor(Math.random()*40_000)).unref();timer=setInterval(tick,CHECK_INTERVAL_MS);timer.unref();console.log('[community-activity] Activity director started - checking every 7 minutes')}

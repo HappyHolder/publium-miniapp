@@ -1,3 +1,4 @@
+import { hydrateLinkedChannel } from './channelContext';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -36,7 +37,7 @@ const plainTelegram=(s:string)=>stripDisabledHighlightMarkers(s).replace(/<[^>]+
 export const verifyCommunityManagerWebhookSecret=(v:unknown)=>typeof v==='string'&&same(v,env.COMMUNITY_MANAGER_WEBHOOK_SECRET);
 async function published(chatId:string,executorType?:'SHARED'|'CUSTOM',communityId?:string):Promise<Ctx|null>{
   const manager=await prisma.communityManager.findFirst({where:{enabled:true,publishedVersion:{not:null},...(executorType?{executorType}:{}),community:{...(communityId?{id:communityId}:{}),moderatorChat:{tgChatId:chatId}}},include:{community:{include:{moderatorChat:true,moderator:true,chat:{include:{style:true}},channel:{include:{brandKit:true}}}}}});
-  if(!manager?.publishedVersion)return null;
+  if(!manager?.publishedVersion)return null;await hydrateLinkedChannel(manager.community);
   const ownerUserId=manager.community.chat?.userId??manager.community.channel?.userId;if(!ownerUserId)return null;const subscription=await getEffectiveSubscription(ownerUserId);
   if(!TIER_LIMITS[subscription.tier].canUseCommunityManager)return null;
   const row=await prisma.communityManagerConfig.findUnique({where:{communityManagerId_version:{communityManagerId:manager.id,version:manager.publishedVersion}}});
@@ -90,7 +91,7 @@ export async function acceptCommunityManagerUpdate(update:TgUpdate,executor:{typ
       prisma.communityManagerJob.create({data:{communityManagerId:ctx.manager.id,messageId:row.id,runAfter:new Date(Date.now()+6000+(ctx.community.moderator?.enabled?1800:0))}}),
       prisma.communityManagerConversationState.upsert({where:{communityManagerId:ctx.manager.id},create:{communityManagerId:ctx.manager.id,lastHumanAt:new Date(),nextInitiativeAt:randomInitiativeDate(ctx.config),messagesSinceAnalysis:1},update:{lastHumanAt:new Date(),messagesSinceAnalysis:{increment:1}}}),
     ]);
-    void processCommunityManagerJobs();return'queued';
+    void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message));return'queued';
   }catch(e){if(e instanceof Prisma.PrismaClientKnownRequestError&&e.code==='P2002')return'duplicate';throw e}
 }
 
@@ -197,18 +198,18 @@ async function processJob(job:any){
 let working=false;
 export async function processCommunityManagerJobs(){
   if(working)return;working=true;
-  await prisma.communityManagerJob.updateMany({where:{status:'CLAIMED',leaseUntil:{lt:new Date()}},data:{status:'RETRY_WAIT',runAfter:new Date(),leaseUntil:null}});
-  try{for(let n=0;n<10;n++){const c=await prisma.communityManagerJob.findFirst({where:{status:{in:['PENDING','RETRY_WAIT']},runAfter:{lte:new Date()},OR:[{leaseUntil:null},{leaseUntil:{lt:new Date()}}]},orderBy:{runAfter:'asc'},include:{message:true}});if(!c)break;const claim=await prisma.communityManagerJob.updateMany({where:{id:c.id,status:c.status},data:{status:'CLAIMED',leaseUntil:new Date(Date.now()+10*60_000),attempts:{increment:1}}});if(claim.count)await processJob({...c,attempts:c.attempts+1})}}
+  try { await prisma.communityManagerJob.updateMany({where:{status:'CLAIMED',leaseUntil:{lt:new Date()}},data:{status:'RETRY_WAIT',runAfter:new Date(),leaseUntil:null}});
+  for(let n=0;n<10;n++){const c=await prisma.communityManagerJob.findFirst({where:{status:{in:['PENDING','RETRY_WAIT']},runAfter:{lte:new Date()},OR:[{leaseUntil:null},{leaseUntil:{lt:new Date()}}]},orderBy:{runAfter:'asc'},include:{message:true}});if(!c)break;const claim=await prisma.communityManagerJob.updateMany({where:{id:c.id,status:c.status},data:{status:'CLAIMED',leaseUntil:new Date(Date.now()+10*60_000),attempts:{increment:1}}});if(claim.count)await processJob({...c,attempts:c.attempts+1})}}
   finally{working=false}
 }
 
 export async function runCommunityActivity(managerId:string,type:CommunityActivityType,topic?:string,meta:{automatic?:boolean;reason?:string;postId?:string;phase?:string}={}){return runActivity(managerId,type,topic,meta)}
 
 let timer:NodeJS.Timeout|undefined;
-export function startCommunityManagerWorker(){if(timer)return;timer=setInterval(()=>{void processCommunityManagerJobs();void Promise.all([prisma.communityManagerMessage.deleteMany({where:{expiresAt:{lt:new Date()}}}),prisma.communityManagerDigestMessage.deleteMany({where:{expiresAt:{lt:new Date()}}})])},5000);timer.unref();void processCommunityManagerJobs()}
+export function startCommunityManagerWorker(){if(timer)return;timer=setInterval(()=>{void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message));void Promise.all([prisma.communityManagerMessage.deleteMany({where:{expiresAt:{lt:new Date()}}}),prisma.communityManagerDigestMessage.deleteMany({where:{expiresAt:{lt:new Date()}}})]).catch(error=>console.error('[community-manager] cleanup failed',error.message))},5000);timer.unref();void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message))}
 
 export async function simulateCommunityManager(managerId:string,text:string,raw?:unknown){
-  const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{chat:true,channel:true,moderatorChat:true}}}});if(!manager?.community.moderatorChat)throw new Error('CM not found');
+  const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{chat:true,channel:true,moderatorChat:true}}}});if(!manager?.community.moderatorChat)throw new Error('CM not found');await hydrateLinkedChannel(manager.community);
   const config=raw?parseCommunityManagerConfig(raw):DEFAULT_CM_CONFIG,result=await runCommunityManagerAgent({managerId:manager.id,communityId:manager.community.id,channelId:manager.community.channelId,channelName:manager.community.chat?.title??manager.community.channel?.name??'сообщество',chatId:manager.community.moderatorChat.tgChatId,config,sessionKey:'simulation:'+Date.now(),event:{kind:'HUMAN_MESSAGE',dedupeKey:'simulation:'+manager.id+':'+Date.now()+':'+Math.random(),currentText:text,currentAuthor:'Тестовый участник',addressedToManager:true}});
   return{decision:result.decision,agentEventId:result.eventId};
 }
@@ -224,7 +225,7 @@ export async function buildCommunityManagerPersonality(managerId:string,raw:unkn
 }
 
 export async function previewCommunityManagerPersonality(managerId:string,raw:unknown){
-  const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{chat:true,channel:true}}}});if(!manager)throw new Error('CM not found');
+  const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{chat:true,channel:true}}}});if(!manager)throw new Error('CM not found');await hydrateLinkedChannel(manager.community);
   const config=parseCommunityManagerConfig(raw),system=personalityPrompt(config)+'\nReturn ONLY JSON with five short natural Russian Telegram replies: {"answer":"reply to a beginner asking what prediction markets are","disagreement":"disagree with a regular member without becoming generic","criticism":"respond when a participant criticizes your previous answer","familiar":"reply to a familiar regular after a successful earlier exchange","conflict":"follow a moderator after two people continued insulting each other"}. Show the selected personality, reaction policy and relationship style while keeping hard safety boundaries. No greetings, self-introduction, support filler, headings or source links.';
   const out=await ai(system,'Community: '+(manager.community.chat?.title??manager.community.channel?.name??'сообщество'));
   const j=jsonObject(out.text);if(!j)throw new Error('Invalid personality preview');

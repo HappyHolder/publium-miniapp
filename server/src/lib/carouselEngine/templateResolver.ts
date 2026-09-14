@@ -1,3 +1,5 @@
+import { templateFetch } from '../templateFetch';
+import { publicFetch } from '../publicFetch';
 /**
  * carouselEngine/templateResolver.ts
  *
@@ -24,7 +26,7 @@ async function fetchTemplate(url: string): Promise<string | null> {
   const hit = cache.get(url);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.html;
   try {
-    const res = await fetch(url);
+    const res = await templateFetch(url);
     if (!res.ok) {
       console.warn(`[carouselEngine] template fetch HTTP ${res.status}: ${url}`);
       return null;

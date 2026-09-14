@@ -1,3 +1,4 @@
+import { publicFetch } from './publicFetch';
 /**
  * visionExtractor.ts
  *
@@ -34,7 +35,7 @@ const EXTRACT_PROMPT =
 async function downloadTelegramFile(fileId: string): Promise<{ buf: Buffer; mime: string }> {
   const filePath = await getFilePath(fileId, env.TELEGRAM_BOT_TOKEN);
   const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
-  const res = await fetch(url);
+  const res = await publicFetch(url);
   if (!res.ok) throw new Error(`Telegram file download HTTP ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   const ext = (filePath.split('.').pop() ?? 'jpg').toLowerCase();
@@ -52,7 +53,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ buf: Buffer; mime
 export async function analyzeReferenceStyle(imageUrl: string): Promise<string | null> {
   if (!env.OPENAI_API_KEY) return null;
   try {
-    const imgRes = await fetch(imageUrl);
+    const imgRes = await publicFetch(imageUrl);
     if (!imgRes.ok) return null;
     const buf = Buffer.from(await imgRes.arrayBuffer());
     const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
@@ -92,6 +93,11 @@ export async function extractImageContent(fileId: string): Promise<string | null
 export async function extractImageContentFromUrl(imageUrl: string): Promise<string | null> {
   if (typeof imageUrl !== 'string' || !/^https?:\/\//i.test(imageUrl)) return null;
   if (!env.OPENAI_API_KEY) return null;
-  const text = await openAiVision({ prompt: EXTRACT_PROMPT, image: imageUrl });
+  const response = await publicFetch(imageUrl, { maxBytes: 10 * 1024 * 1024 });
+  if (!response.ok) return null;
+  const mime = response.headers.get('content-type')?.split(';')[0] ?? '';
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) return null;
+  const image = `data:${mime};base64,${Buffer.from(await response.arrayBuffer()).toString('base64')}`;
+  const text = await openAiVision({ prompt: EXTRACT_PROMPT, image });
   return text?.slice(0, MAX_OUT_CHARS) || null;
 }

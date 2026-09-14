@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
 import { validateAndParseTelegramInitData } from '../lib/telegram';

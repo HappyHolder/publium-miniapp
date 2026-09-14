@@ -112,10 +112,10 @@ export async function toolChannelStats(userId: string, channelId: string, channe
   const [drafts, scheduled, published, nextPost] = await Promise.all([
     prisma.generatedPost.count({ where: { channelId, channel: { userId }, status: 'NEW' } }),
     prisma.generatedPost.count({ where: { channelId, channel: { userId }, status: 'SCHEDULED' } }),
-    prisma.generatedPost.count({ where: { channelId, channel: { userId }, status: 'PUBLISHED' } }),
+    prisma.publicationRecord.count({ where: { channelId, userId, status: 'PUBLISHED' } }),
     prisma.generatedPost.findFirst({ where: { channelId, channel: { userId }, status: 'SCHEDULED', scheduledAt: { not: null } }, orderBy: { scheduledAt: 'asc' }, select: { scheduledAt: true } }),
   ]).catch(() => [0, 0, 0, null] as const);
-  const last7 = await prisma.generatedPost.count({ where: { channelId, channel: { userId }, status: 'PUBLISHED', updatedAt: { gte: new Date(Date.now() - 7 * 86_400_000) } } }).catch(() => 0);
+  const last7 = await prisma.publicationRecord.count({ where: { channelId, userId, status: 'PUBLISHED', publishedAt: { gte: new Date(Date.now() - 7 * 86_400_000) } } }).catch(() => 0);
   return `CHANNEL_STATS for ${channelLabel} (Publium-owned data only, not Telegram subscriber counts):\n` +
     `- drafts (черновики): ${drafts}\n- scheduled (в Отложке): ${scheduled}\n- published via Publium (всего): ${published}\n` +
     `- published in last 7 days: ${last7}\n- next scheduled: ${nextPost?.scheduledAt ? fmtMsk(nextPost.scheduledAt) : 'none'}`;

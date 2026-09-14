@@ -1,3 +1,4 @@
+import { enqueueSave } from '@/lib/saveQueue'
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react'
 import type { AppState, GeneratedPost, Channel, Chat, ChatStyle, BrandKit, Subscription, PlanTier } from '@/types'
 import { mockInitialState } from '@/data/mockData'
@@ -121,8 +122,8 @@ interface AppContextValue {
   connectChat: (chat: Chat) => void
   disconnectChat: (chatId: string) => void
   setChatLinkedChannel: (chatId: string, channel: Channel | null) => void
-  updateBrandKit: (channelId: string, kit: Partial<BrandKit>) => void
-  updateChatStyle: (chatId: string, style: Partial<ChatStyle>) => void
+  updateBrandKit: (channelId: string, kit: Partial<BrandKit>) => Promise<boolean>
+  updateChatStyle: (chatId: string, style: Partial<ChatStyle>) => Promise<boolean>
   applyServerSubscription: (sub: ServerSubscription) => void
   toasts: Toast[]
   showToast: (message: string, type?: Toast['type']) => void
@@ -526,11 +527,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [refreshPosts])
 
   const deletePost = useCallback((postId: string) => {
-    setState(prev => ({
-      ...prev,
-      posts: prev.posts.filter(p => p.id !== postId),
-    }))
-  }, [])
+    postService.remove(postId)
+    refreshPosts()
+  }, [refreshPosts])
 
   const updateVariantBannerUrl = useCallback((postId: string, variantId: string, bannerUrl: string) => {
     setState(prev => ({
@@ -645,40 +644,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setState(prev => ({ ...prev, chats: prev.chats.map(chat => chat.id === chatId ? { ...chat, linkedChannel } : chat) }))
   }, [])
 
-  const updateChatStyle = useCallback((chatId: string, updates: Partial<ChatStyle>) => {
-    setState(prev => ({ ...prev, chatStyles: prev.chatStyles.map(style => style.chatId === chatId ? { ...style, ...updates, chatId } : style) }))
-    showToast(t('channelStyle.saved'))
-    if (authStatus === 'authenticated') {
-      const initData = getTelegramInitData()
-      if (initData) fetch(`${API_BASE}/api/chats/${chatId}/style`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, sections: updates }) }).catch(() => {})
-    }
-  }, [authStatus, showToast, t])
+  const saveSections = useCallback(async (path: string, sections: unknown): Promise<void> => {
+    if (authStatus !== 'authenticated') return
+    const initData = getTelegramInitData()
+    if (!initData) throw new Error('Сессия истекла. Откройте приложение заново.')
+    const response = await fetch(`${API_BASE}${path}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, sections }) })
+    if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error ?? 'Не удалось сохранить изменения.') }
+  }, [authStatus])
 
-  const updateBrandKit = useCallback((channelId: string, updates: Partial<BrandKit>) => {
-    // 1. Immediate in-memory update — UI reflects changes instantly
-    brandKitService.update(channelId, updates)
-    setState(prev => ({
-      ...prev,
-      brandKits: brandKitService.getAll(),
-    }))
-    showToast(t('channelStyle.saved'))
+  const updateChatStyle = useCallback((chatId: string, updates: Partial<ChatStyle>): Promise<boolean> => enqueueSave(`chat:${chatId}`, async () => {
+    try {
+      await saveSections(`/api/chats/${chatId}/style`, updates)
+      setState(prev => ({ ...prev, chatStyles: prev.chatStyles.map(style => style.chatId === chatId ? { ...style, ...updates, chatId } : style) }))
+      showToast(t('channelStyle.saved')); return true
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Изменения не сохранены. Повторите попытку.', 'error'); return false }
+  }), [saveSections, showToast, t])
 
-    // 2. Persist to Neon — fire-and-forget; does not block UI or crash on failure
-    if (authStatus === 'authenticated') {
-      const initData = getTelegramInitData()
-      if (initData) {
-        fetch(`${API_BASE}/api/brandkits/${channelId}`, {
-          method:  'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ initData, sections: updates }),
-        }).catch(err => {
-          // Non-fatal: in-memory save already succeeded; user sees no error.
-          // Silent log only — do not expose initData or secrets.
-          console.error('[updateBrandKit] Backend save failed:', (err as Error).message)
-        })
-      }
-    }
-  }, [showToast, t, authStatus])
+  const updateBrandKit = useCallback((channelId: string, updates: Partial<BrandKit>): Promise<boolean> => enqueueSave(`channel:${channelId}`, async () => {
+    try {
+      await saveSections(`/api/brandkits/${channelId}`, updates)
+      brandKitService.update(channelId, updates)
+      setState(prev => ({ ...prev, brandKits: brandKitService.getAll() }))
+      showToast(t('channelStyle.saved')); return true
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Изменения не сохранены. Повторите попытку.', 'error'); return false }
+  }), [saveSections, showToast, t])
 
   const activeChannel = state.channels.find(c => c.id === state.activeChannelId)
 

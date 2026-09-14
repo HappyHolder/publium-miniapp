@@ -152,7 +152,6 @@ export const en = {
     promoConnError:     'Connection error',
     choosePayment:      'Payment method',
     payForDays:         'for 30 days',
-    payStarsOnly:       'Stars payment is available only in Telegram',
     paySuccess:         'Payment complete! Plan updated.',
     payTonChecking:     'Payment sent, verifying… this can take up to a minute.',
     payFailed:          'Payment failed',
@@ -163,7 +162,7 @@ export const en = {
     videoGenerationSoon: 'Video generation — soon',
     upgradeToPremium:   'Switch to Premium',
     underHood:          'Under the hood',
-    footer:             'Pay with Telegram Stars or Gram · 30-day subscription',
+    footer:             'Pay with TON · 30-day subscription',
   },
   posts: {
     tabs: {

@@ -1,3 +1,5 @@
+import { templateFetch } from './templateFetch';
+import { publicFetch } from './publicFetch';
 /**
  * playwrightRenderer.ts
  *
@@ -103,11 +105,17 @@ export async function closeBrowser(): Promise<void> {
 // a non-public address or a non-http(s) scheme, so a crafted template cannot
 // probe the internal network or read local files into the screenshot.
 async function guardPage(page: Browser): Promise<void> {
+  await page.routeWebSocket('**/*', (socket: { close: () => void }) => socket.close());
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await page.route('**/*', async (route: any) => {
     try {
       if (await isBlockedRequestUrl(route.request().url())) return route.abort();
-      return route.continue();
+      if (!/^https?:/.test(route.request().url())) return route.continue();
+      if (route.request().method() !== 'GET') return route.abort();
+      const response = await publicFetch(route.request().url(), { maxBytes: 16 * 1024 * 1024 });
+      const headers = Object.fromEntries(response.headers.entries());
+      delete headers['content-length']; delete headers['transfer-encoding'];
+      return route.fulfill({ status: response.status, headers, body: Buffer.from(await response.arrayBuffer()) });
     } catch {
       return route.abort();
     }
@@ -338,7 +346,7 @@ export async function measureContentZone(
   const { W, H } = getDimensions(aspectRatio);
   try {
     const browser = await getBrowser();
-    const page    = await browser.newPage();
+    const page    = await browser.newPage({ serviceWorkers: 'block' });
     await guardPage(page);
     try {
       await page.setViewportSize({ width: W, height: H });
@@ -435,7 +443,7 @@ export async function renderHtmlString(
 
   try {
     const browser = await getBrowser();
-    const page    = await browser.newPage();
+    const page    = await browser.newPage({ serviceWorkers: 'block' });
     await guardPage(page);
     try {
       await page.setViewportSize({ width: W, height: H });
@@ -518,7 +526,7 @@ export async function renderHtmlTemplate(
 ): Promise<GeneratedCover | null> {
   let html: string;
   try {
-    const res = await fetch(input.htmlTemplateUrl);
+    const res = await templateFetch(input.htmlTemplateUrl);
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching template`);
     html = await res.text();
   } catch (err) {
@@ -555,7 +563,7 @@ export async function renderHtmlTemplate(
   let pngBuffer: Buffer;
   try {
     const browser = await getBrowser();
-    const page    = await browser.newPage();
+    const page    = await browser.newPage({ serviceWorkers: 'block' });
     await guardPage(page);
     try {
       await page.setViewportSize({ width: W, height: H });
@@ -606,7 +614,7 @@ export interface PreviewRenderInput {
 export async function renderHtmlPreview(input: PreviewRenderInput): Promise<string | null> {
   let html: string;
   try {
-    const res = await fetch(input.htmlTemplateUrl);
+    const res = await templateFetch(input.htmlTemplateUrl);
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching template`);
     html = await res.text();
   } catch (err) {
@@ -631,7 +639,7 @@ export async function renderHtmlPreview(input: PreviewRenderInput): Promise<stri
   let pngBuffer: Buffer;
   try {
     const browser = await getBrowser();
-    const page    = await browser.newPage();
+    const page    = await browser.newPage({ serviceWorkers: 'block' });
     await guardPage(page);
     try {
       await page.setViewportSize({ width: W, height: H });

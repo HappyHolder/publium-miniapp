@@ -7,7 +7,7 @@ import type { MarketStyle } from '@/types'
 
 /**
  * Styles tab — the cover-style market. Cards show a static demo preview; tapping
- * one opens a near-fullscreen detail sheet to buy (Stars/Gram) or apply.
+ * one opens a near-fullscreen detail sheet to buy (TON) or apply.
  */
 export function StylesScreen() {
   const { language, t } = useApp()
@@ -56,9 +56,7 @@ export function StylesScreen() {
             const ownedNow = isStyleOwned(style, owned)
             const priceLabel = style.priceKind === 'FREE'
               ? t('styles.free')
-              : style.priceStars != null
-                ? `${style.priceStars} ⭐`
-                : `${style.priceGram} Gram`
+              : `${style.priceGram} TON`
             return (
               <button
                 key={style.id}

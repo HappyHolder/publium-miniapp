@@ -1,4 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { confirmPlan, cancelPlan } from '../lib/contentPlanQuota';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
 import { validateAndParseTelegramInitData } from '../lib/telegram';
@@ -53,43 +55,9 @@ router.post('/:id/confirm', async (req: Request, res: Response): Promise<void> =
   const auth = await authPlan(res, req.body?.['initData'], planId);
   if (!auth) return;
 
-  const plan = await prisma.contentPlan.findUnique({
-    where:   { id: planId },
-    include: { items: { select: { status: true } } },
-  });
-  if (!plan) { res.status(404).json({ error: 'Plan not found.' }); return; }
-  if (plan.status !== 'DRAFT') {
-    res.status(409).json({ error: 'Plan already started.', status: plan.status }); return;
-  }
-
-  const subscription = await getEffectiveSubscription(auth.userId);
-  const limits = TIER_LIMITS[subscription.tier];
-  const pending = plan.items.filter(i => i.status !== 'DONE' && i.status !== 'SKIPPED').length;
-  const contentQuota = await reserveSubscriptionQuota(auth.userId, 'contentManagerPosts', pending);
-  if (!contentQuota.ok) {
-    res.status(429).json({ error: `Недостаточно лимита Content Manager: нужно ${pending}, доступно ${Math.max(0, contentQuota.limit - contentQuota.used)}.`, code: 'CONTENT_MANAGER_LIMIT', needed: pending, available: Math.max(0, contentQuota.limit - contentQuota.used) });
-    return;
-  }
-  let visualsReserved = false;
-  if (limits.canUseAiVisuals) {
-    const visualQuota = await reserveSubscriptionQuota(auth.userId, 'visual', pending);
-    if (!visualQuota.ok) {
-      await refundSubscriptionQuota(auth.userId, 'contentManagerPosts', pending);
-      res.status(429).json({ error: `Для плана нужно ${pending} визуальных генераций, доступно ${Math.max(0, visualQuota.limit - visualQuota.used)}.`, code: 'VISUAL_LIMIT_REACHED', needed: pending, available: Math.max(0, visualQuota.limit - visualQuota.used) });
-      return;
-    }
-    visualsReserved = true;
-  }
-  try {
-    await prisma.contentPlan.update({ where: { id: planId }, data: { status: 'GENERATING', generateVisuals: limits.canUseAiVisuals, errorMessage: null } });
-    enqueueContentPlan(planId);
-    res.json({ ok: true, planId, status: 'GENERATING' });
-  } catch (err) {
-    if (visualsReserved) await refundSubscriptionQuota(auth.userId, 'visual', pending);
-    await refundSubscriptionQuota(auth.userId, 'contentManagerPosts', pending);
-    console.error('[content-plan/confirm] failed:', (err as Error).message);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+  await confirmPlan(planId, auth.userId);
+  enqueueContentPlan(planId);
+  res.json({ ok: true, planId, status: 'GENERATING' });
 });
 
 // ─── GET /api/content-plan/:id ────────────────────────────────────────────────
@@ -132,26 +100,8 @@ router.post('/:id/cancel', async (req: Request, res: Response): Promise<void> =>
   const auth = await authPlan(res, req.body?.['initData'], planId);
   if (!auth) return;
 
-  try {
-    await prisma.contentPlan.update({ where: { id: planId }, data: { status: 'CANCELLED' } });
-
-    // Un-schedule posts this plan already created that haven't published yet.
-    const items = await prisma.contentPlanItem.findMany({
-      where:  { planId, generatedPostId: { not: null } },
-      select: { generatedPostId: true },
-    });
-    const postIds = items.map(i => i.generatedPostId!).filter(Boolean);
-    if (postIds.length > 0) {
-      await prisma.generatedPost.updateMany({
-        where: { id: { in: postIds }, status: 'SCHEDULED' },
-        data:  { status: 'ARCHIVED', scheduledAt: null },
-      }).catch(() => {});
-    }
-    res.json({ ok: true, status: 'CANCELLED' });
-  } catch (err) {
-    console.error('[content-plan/cancel] failed:', (err as Error).message);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+  await cancelPlan(planId, auth.userId);
+  res.json({ ok: true, status: 'CANCELLED' });
 });
 
 // ─── POST /api/content-plan/list ──────────────────────────────────────────────

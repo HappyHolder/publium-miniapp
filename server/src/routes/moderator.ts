@@ -1,6 +1,7 @@
+import { Router } from '../lib/asyncRouter';
 import crypto from 'crypto';
 import { AsyncLocalStorage } from 'async_hooks';
-import { Router, Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -848,6 +849,7 @@ router.post('/channels/:channelId/community', async (req, res) => {
   }
 
   const community = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${auth.user.id} FOR UPDATE`;
     const canonicalChat = await tx.chat.upsert({ where: { tgChatId: chat.tgChatId }, update: { title: chat.title, username: chat.username?.toLowerCase() ?? null, type: chat.type }, create: { tgChatId: chat.tgChatId, title: chat.title, username: chat.username?.toLowerCase() ?? null, type: chat.type, userId: auth.user.id } });
     await tx.chatStyle.upsert({ where: { chatId: canonicalChat.id }, update: {}, create: { chatId: canonicalChat.id } });
     const base = await tx.community.upsert({
@@ -855,6 +857,8 @@ router.post('/channels/:channelId/community', async (req, res) => {
       create: { channelId: channel.id, chatId: canonicalChat.id, moderatorChatId: chat.id },
       update: { chatId: canonicalChat.id, moderatorChatId: chat.id },
     });
+    if (canonicalChat.userId !== auth.user.id) throw Object.assign(new Error('Чат принадлежит другому пользователю.'), { status: 403 });
+    await tx.channelChatLink.updateMany({ where: { OR: [{ channelId: channel.id }, { chatId: canonicalChat.id }], isPrimary: true }, data: { isPrimary: false } });
     await tx.channelChatLink.upsert({ where: { channelId_chatId: { channelId: channel.id, chatId: canonicalChat.id } }, create: { channelId: channel.id, chatId: canonicalChat.id, isPrimary: true }, update: { isPrimary: true } });
     const moderator = await tx.moderator.upsert({
       where: { communityId: base.id },

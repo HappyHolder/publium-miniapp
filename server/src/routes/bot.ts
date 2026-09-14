@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -8,8 +9,6 @@ import { sendBotMessage, sendBotPhoto, sendBotPhotoFile, answerInlinePostQuery, 
 import { resolveInlineShare } from '../lib/inlineShare';
 import { createDraftPostForChannel, type DraftPost } from '../lib/draftGenerator';
 import { getEffectiveSubscription, reserveSubscriptionQuota, refundSubscriptionQuota, TIER_LIMITS } from '../lib/subscriptionLimits';
-import { isPaidTier, grantSubscription, pricingFor } from '../lib/payments';
-import { grantStylePurchase } from '../lib/styles';
 import { fetchArticle } from '../lib/urlContentExtractor';
 import { extractImageContent } from '../lib/visionExtractor';
 import { runWebhookBackgroundTask } from '../lib/webhookBackground';
@@ -490,50 +489,16 @@ router.post('/webhook', async (req: Request, res: Response): Promise<void> => {
   }
 
   if (update.pre_checkout_query) {
-    await answerPreCheckoutQuery(update.pre_checkout_query.id, true, env.TELEGRAM_BOT_TOKEN);
+    await answerPreCheckoutQuery(update.pre_checkout_query.id, false, env.TELEGRAM_BOT_TOKEN, 'Оплата Stars отключена. Откройте приложение и выберите TON.');
     res.status(200).json({ ok: true });
     return;
   }
 
-  // ── Stars payments: successful_payment is the authoritative grant ────────
+  // Preserve late historical payment notices for reconciliation; no Stars grants or new sales.
   if (update.message?.successful_payment) {
-    const pay = update.message.successful_payment;
-    const payChatId = update.message.chat.id;
-    if (pay.currency === 'XTR') {
-      try {
-        const data = JSON.parse(pay.invoice_payload) as { t?: string; tier?: unknown; uid?: string; sid?: string };
-        if (data.t === 'style' && typeof data.sid === 'string' && typeof data.uid === 'string') {
-          // One-time style purchase. Idempotent: a duplicate webhook resolves to
-          // alreadyOwned (unique userId+styleId) and skips the confirmation reply.
-          const { alreadyOwned } = await grantStylePurchase(data.uid, data.sid, 'STARS');
-          if (!alreadyOwned) {
-            await trySendReply(payChatId, '✅ Оплата получена. Стиль обложек разблокирован — открой вкладку «Стили» и нажми «Применить».');
-          }
-        } else if (data.t === 'sub' && isPaidTier(data.tier) && typeof data.uid === 'string') {
-          const tier = data.tier;
-          const userId = data.uid;
-          const chargeId = pay.telegram_payment_charge_id;
-          const expectedStars = pricingFor(tier).stars;
-          if (!chargeId || pay.total_amount !== expectedStars) {
-            console.error('[bot/webhook] Stars payment validation failed:', { chargeId: Boolean(chargeId), paid: pay.total_amount, expected: expectedStars });
-          } else {
-            try {
-              await prisma.$transaction(async (tx) => {
-                await tx.starsPayment.create({
-                  data: { chargeId, userId, tier, amountStars: pay.total_amount },
-                });
-                await grantSubscription(userId, tier, undefined, tx);
-              });
-              await trySendReply(payChatId, '✅ Оплата получена. Тариф активирован на 30 дней. Открой приложение.');
-            } catch (error) {
-              if ((error as { code?: string })?.code !== 'P2002') throw error;
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[bot/webhook] successful_payment grant failed:', (err as Error).message);
-      }
-    }
+    const payment = update.message.successful_payment;
+    if (!payment.telegram_payment_charge_id) { res.status(400).json({ error: 'Missing charge id' }); return; }
+    await prisma.legacyPaymentNotice.upsert({ where: { chargeId: payment.telegram_payment_charge_id }, create: { chargeId: payment.telegram_payment_charge_id, payload: JSON.parse(JSON.stringify(payment)) }, update: {} });
     res.status(200).json({ ok: true });
     return;
   }

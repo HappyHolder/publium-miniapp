@@ -284,6 +284,7 @@ model GeneratedPost {
   jobId           String?
   status          PostStatus @default(NEW)
   scheduledAt     DateTime?
+  publishState    String @default("IDLE")
   publishedAt     DateTime?
   tgChatId        String? // chat id of the published channel message — enables edit-in-place
   tgMessageId     Int? // message id of the published channel message (5-hour re-publish window)
@@ -633,6 +634,8 @@ model ContentPlan {
   source       String            @default("web") // 'web' | 'uploads' | 'both'
   status       ContentPlanStatus @default(DRAFT)
   generateVisuals Boolean          @default(true)
+  leaseUntil DateTime?
+  leaseOwner String?
   errorMessage String?
 
   createdAt DateTime @default(now())
@@ -658,6 +661,9 @@ model ContentPlanItem {
   angle           String
   searchQuery     String
   status          PlanItemStatus @default(PENDING)
+  contentReserved Boolean @default(false)
+  visualReserved Boolean @default(false)
+  quotaPeriod DateTime?
   generatedPostId String?
   errorMessage    String?
 
@@ -1527,4 +1533,50 @@ model PersonaMessageClaim {
 
   @@unique([communityId, telegramMessageId])
   @@index([createdAt])
+}
+
+// Durable media ownership. Unregistered legacy files are never deleted by user cleanup.
+model StoredAsset {
+  pathname String @id
+  ownerUserId String?
+  createdAt DateTime @default(now())
+  @@index([ownerUserId])
+}
+model PaymentOrder {
+  id String @id @default(uuid())
+  userId String
+  kind String
+  productId String
+  amountTon Float
+  receivingWallet String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  paidAt DateTime?
+  @@index([userId, createdAt])
+}
+model PaymentLedger {
+  txHash String @id
+  orderId String? @unique
+  userId String
+  kind String
+  createdAt DateTime @default(now())
+}
+// Incoming notifications for already-issued historical invoices; no new Stars sales.
+model LegacyPaymentNotice {
+  chargeId String @id
+  payload Json
+  createdAt DateTime @default(now())
+}
+// Kept independently from the five-hour editable post retention window.
+model PublicationRecord {
+  postId String @id
+  channelId String
+  userId String
+  status String
+  startedAt DateTime @default(now())
+  publishedAt DateTime?
+  tgChatId String?
+  tgMessageId Int?
+  error String?
+  @@index([userId, channelId, publishedAt])
 }

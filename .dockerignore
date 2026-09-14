@@ -10,3 +10,9 @@ uploads
 *.log
 .env
 .env.*
+
+promo
+screenshots
+.codex
+.claude
+.research

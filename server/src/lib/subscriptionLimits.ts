@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import type { PlanTier, Subscription } from '@prisma/client';
 import { prisma } from '../db';
 
@@ -90,9 +91,9 @@ function quotaLimit(sub: Subscription, quota: SubscriptionQuota): number {
  * Returns the effective subscription and performs expiry/monthly reset first.
  * Every paid feature route must use this function instead of reading tier raw.
  */
-export async function getEffectiveSubscription(userId: string): Promise<Subscription> {
+export async function getEffectiveSubscription(userId: string, db: Prisma.TransactionClient = prisma): Promise<Subscription> {
   const now = new Date();
-  let sub = await prisma.subscription.upsert({
+  let sub = await db.subscription.upsert({
     where: { userId },
     create: { userId, tier: 'FREE', quotaResetAt: addOneMonth(now) },
     update: {},
@@ -103,14 +104,15 @@ export async function getEffectiveSubscription(userId: string): Promise<Subscrip
   if (expired || resetDue) {
     let nextReset = sub.quotaResetAt ?? addOneMonth(now);
     while (nextReset <= now) nextReset = addOneMonth(nextReset);
-    sub = await prisma.subscription.update({
-      where: { userId },
+    await db.subscription.updateMany({
+      where: { userId, quotaResetAt: sub.quotaResetAt, expiresAt: sub.expiresAt },
       data: {
         ...(expired ? { tier: 'FREE' as const, expiresAt: null } : {}),
         ...zeroUsage,
         quotaResetAt: nextReset,
       },
     });
+    sub = await db.subscription.findUniqueOrThrow({ where: { userId } });
   }
   return sub;
 }
@@ -129,7 +131,7 @@ export async function reserveSubscriptionQuota(
   if (limit <= 0 || used + amount > limit) return { ok: false, subscription: sub, limit, used };
 
   const claimed = await prisma.subscription.updateMany({
-    where: { userId, [field]: { lte: limit - amount } },
+    where: { userId, tier: sub.tier, quotaResetAt: sub.quotaResetAt, [field]: { lte: limit - amount } },
     data: { [field]: { increment: amount } },
   });
   if (claimed.count !== 1) {

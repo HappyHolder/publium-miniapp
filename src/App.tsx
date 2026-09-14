@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { lazy, Suspense, useState, useCallback, useRef, useEffect } from 'react'
 import { Loader2, ChevronDown, Bot } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AppProvider, useApp } from '@/context/AppContext'
@@ -7,19 +7,21 @@ import { AppShell } from '@/components/layout/AppShell'
 import { BottomNav } from '@/components/layout/BottomNav'
 import { ToastContainer } from '@/components/ui/Toast'
 import { PostsScreen } from '@/screens/PostsScreen'
-import { CreateScreen } from '@/screens/CreateScreen'
-import { StylesScreen } from '@/screens/StylesScreen'
-import { ProfileScreen } from '@/screens/ProfileScreen'
-import { CommunityScreen } from '@/screens/CommunityScreen'
-import { PostDetailsScreen } from '@/screens/PostDetailsScreen'
-import { BrandKitScreen } from '@/screens/BrandKitScreen'
-import { ChatStyleScreen } from '@/screens/ChatStyleScreen'
-import { PlansScreen } from '@/screens/PlansScreen'
-import { AdminPanelScreen } from '@/screens/AdminPanelScreen'
-import { OnboardingSlides } from '@/screens/OnboardingSlides'
-import { ChatScreen, type ChatMessage, type ContentPlan, type AssistantAction } from '@/screens/ChatScreen'
+const CreateScreen = lazy(() => import('@/screens/CreateScreen').then(module => ({ default: module.CreateScreen })))
+const StylesScreen = lazy(() => import('@/screens/StylesScreen').then(module => ({ default: module.StylesScreen })))
+const ProfileScreen = lazy(() => import('@/screens/ProfileScreen').then(module => ({ default: module.ProfileScreen })))
+const CommunityScreen = lazy(() => import('@/screens/CommunityScreen').then(module => ({ default: module.CommunityScreen })))
+const PostDetailsScreen = lazy(() => import('@/screens/PostDetailsScreen').then(module => ({ default: module.PostDetailsScreen })))
+const BrandKitScreen = lazy(() => import('@/screens/BrandKitScreen').then(module => ({ default: module.BrandKitScreen })))
+const ChatStyleScreen = lazy(() => import('@/screens/ChatStyleScreen').then(module => ({ default: module.ChatStyleScreen })))
+const PlansScreen = lazy(() => import('@/screens/PlansScreen').then(module => ({ default: module.PlansScreen })))
+const AdminPanelScreen = lazy(() => import('@/screens/AdminPanelScreen').then(module => ({ default: module.AdminPanelScreen })))
+const OnboardingSlides = lazy(() => import('@/screens/OnboardingSlides').then(module => ({ default: module.OnboardingSlides })))
+import { type ChatMessage, type ContentPlan, type AssistantAction } from '@/screens/ChatScreen'
 import { getTelegramInitData } from '@/lib/telegram'
 import { API_BASE } from '@/lib/api'
+
+const ChatScreen = lazy(() => import('@/screens/ChatScreen').then(module => ({ default: module.ChatScreen })))
 
 type MainTab = 'posts' | 'create' | 'ai' | 'styles' | 'profile'
 
@@ -363,7 +365,7 @@ export default function App() {
   return (
     <AppProvider>
       <WalkthroughProvider>
-        <AppContent />
+        <Suspense fallback={<div className="flex h-screen items-center justify-center text-white">Загрузка…</div>}><AppContent /></Suspense>
       </WalkthroughProvider>
     </AppProvider>
   )

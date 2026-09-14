@@ -1,4 +1,5 @@
-import { Router, type Request, type Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { type Request, type Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
 import { validateAndParseTelegramInitData } from '../lib/telegram';
@@ -51,14 +52,15 @@ router.post('/:chatId/link-channel', async (req, res) => {
     prisma.channel.findFirst({ where: { id: channelId, userId: user.id, kind: 'CHANNEL' }, select: { id: true } }),
   ]);
   if (!chat || !channel) { res.status(404).json({ error: 'Chat or channel not found' }); return; }
-  await prisma.$transaction([
-    prisma.channelChatLink.updateMany({ where: { channelId: channel.id, isPrimary: true }, data: { isPrimary: false } }),
-    prisma.channelChatLink.upsert({
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+    await tx.channelChatLink.updateMany({ where: { OR: [{ channelId: channel.id }, { chatId: chat.id }], isPrimary: true }, data: { isPrimary: false } });
+    await tx.channelChatLink.upsert({
       where: { channelId_chatId: { channelId: channel.id, chatId: chat.id } },
       create: { channelId: channel.id, chatId: chat.id, relationType: 'MANUAL', isPrimary: true },
       update: { relationType: 'MANUAL', isPrimary: true },
-    }),
-  ]);
+    });
+  });
   res.json({ ok: true });
 });
 

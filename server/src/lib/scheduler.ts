@@ -1,19 +1,12 @@
+import { publishPost } from './publication';
 /**
  * scheduler.ts
  *
  * Background polling loop that auto-publishes SCHEDULED posts whose
  * scheduledAt timestamp has passed.
  *
- * Design:
- *   - Pure setInterval — no extra dependencies.
- *   - Runs once at server startup (to catch posts missed during downtime),
- *     then every 60 s.
- *   - Single-instance safe: the stack runs one `api` container, so no
- *     distributed lock is needed for this app.
- *   - Delivery order: Telegram send THEN DB update (same as the manual
- *     publish route). If the DB update fails after a successful send the
- *     post remains SCHEDULED and will be retried; Telegram may receive a
- *     duplicate. This is acceptable at MVP scale.
+ * Manual and scheduled publication share an atomic database claim. Ambiguous
+ * delivery outcomes are held for reconciliation instead of blindly retried.
  */
 
 import { cleanupInterventionContext } from '../moderator/interventionEngine';
@@ -27,145 +20,9 @@ import { POST_EDIT_WINDOW_MS } from './postRetention';
 import { normalizePostBlocks, type PostBlock } from './richPost';
 import { queuePublishedPostContentSupport } from '../communityManager/contentRelease';
 
-// ─── In-flight guard ─────────────────────────────────────────────────────────
-// Prevents two concurrent sweeps (e.g. a slow sweep + the next setInterval tick)
-// from processing the same post twice within the same process.
-// Does not help across multiple processes (only one runs on Render anyway).
-const inFlight = new Set<string>();
-
-// ─── Core publish sweep ───────────────────────────────────────────────────────
-
 async function publishDuePosts(): Promise<void> {
-  const now = new Date();
-
-  // ── Find all due posts ────────────────────────────────────────────────────
-  let duePosts: {
-    id:                string;
-    title:             string;
-    selectedVariantId: string | null;
-    linkButtons:       unknown;
-    channel:           { id: string; handle: string | null; name: string; tgChatId: string | null };
-    variants:          { id: string; text: string; bannerUrl: string | null; blocks: unknown }[];
-  }[];
-
-  try {
-    duePosts = await prisma.generatedPost.findMany({
-      where: {
-        status:      'SCHEDULED',
-        scheduledAt: { lte: now },
-      },
-      select: {
-        id:                true,
-        title:             true,
-        selectedVariantId: true,
-        linkButtons:       true,
-        channel: {
-          select: { id: true, handle: true, name: true, tgChatId: true },
-        },
-        variants: {
-          orderBy: { variantIndex: 'asc' },
-          select:  { id: true, text: true, bannerUrl: true, blocks: true },
-        },
-      },
-    });
-  } catch (err) {
-    console.error('[scheduler] DB query failed:', (err as Error).message);
-    return;
-  }
-
-  if (duePosts.length === 0) return;
-
-  console.log(`[scheduler] ${duePosts.length} post(s) due — publishing…`);
-
-  // ── Process each due post ─────────────────────────────────────────────────
-  for (const post of duePosts) {
-
-    // Skip posts already being handled by a concurrent sweep in this process
-    if (inFlight.has(post.id)) continue;
-    inFlight.add(post.id);
-
-    try {
-
-    // Resolve selected variant text
-    const selectedVariant =
-      post.variants.find(v => v.id === post.selectedVariantId) ?? post.variants[0];
-
-    const normalizedBlocks = normalizePostBlocks(selectedVariant?.blocks);
-    const blocks = normalizedBlocks?.length ? normalizedBlocks : null;
-    if (!selectedVariant?.text?.trim() && !blocks) {
-      console.error(`[scheduler] Post ${post.id}: no publishable content — skipping`);
-      continue;
-    }
-
-    // Prefer the stable numeric chat id (rename-proof); fall back to @handle.
-    if (!post.channel.tgChatId && !post.channel.handle) {
-      console.error(`[scheduler] Post ${post.id}: no channel id/handle — skipping`);
-      continue;
-    }
-    const channelTarget = post.channel.tgChatId ?? `@${post.channel.handle}`;
-
-    // Build optional inline keyboard from stored link buttons
-    const replyMarkup = buildInlineKeyboard(post.linkButtons);
-
-    // Send to Telegram — short post → native photo+caption; long post → full
-    // text message with the cover as a large preview card (sendChannelPost).
-    let sentRef: Awaited<ReturnType<typeof sendRichChannelPost>> = null;
-    try {
-      if (blocks) {
-        sentRef = await sendRichChannelPost({
-          chatId:      channelTarget,
-          blocks,
-          title:       post.title,
-          siteName:    post.channel.name || post.channel.handle || undefined,
-          token:       env.TELEGRAM_BOT_TOKEN,
-          replyMarkup,
-        });
-      } else {
-        sentRef = await sendChannelPost({
-          chatId:      channelTarget,
-          text:        selectedVariant.text,
-          bannerUrl:   selectedVariant.bannerUrl,
-          title:       post.title,
-          siteName:    post.channel.name || post.channel.handle || undefined,
-          token:       env.TELEGRAM_BOT_TOKEN,
-          replyMarkup,
-        });
-      }
-    } catch (err) {
-      console.error(`[scheduler] Post ${post.id}: Telegram send failed — will retry next poll:`, (err as Error).message);
-      // Leave status=SCHEDULED so the next sweep retries.
-      continue;
-    }
-
-    // Self-heal: remember the numeric chat id so future publishes are rename-proof.
-    if (!post.channel.tgChatId && sentRef?.chatId) {
-      prisma.channel.update({ where: { id: post.channel.id }, data: { tgChatId: String(sentRef.chatId) } })
-        .catch(e => console.error(`[scheduler] Post ${post.id}: tgChatId backfill failed:`, (e as Error).message));
-    }
-
-    // Mark PUBLISHED in DB — store the sent message ref for the 5-hour
-    // edit-in-place window (mirrors the manual /publish route).
-    const publishedAt = new Date();
-    try {
-      await prisma.generatedPost.update({
-        where: { id: post.id },
-        data:  {
-          status:      'PUBLISHED',
-          publishedAt,
-          tgChatId:    sentRef ? String(sentRef.chatId) : null,
-          tgMessageId: sentRef?.messageId ?? null,
-        },
-      });
-      console.log(`[scheduler] Post ${post.id} published at ${publishedAt.toISOString()}`);
-      await queuePublishedPostContentSupport(post.id).catch(error=>console.error('[scheduler] CM content release queue failed',(error as Error).message));
-    } catch (err) {
-      console.error(`[scheduler] Post ${post.id}: DB update failed — message was sent to Telegram:`, (err as Error).message);
-    }
-
-    } finally {
-      inFlight.delete(post.id);
-    }
-  }
+  const due = await prisma.generatedPost.findMany({ where: { status: 'SCHEDULED', publishState: 'IDLE', scheduledAt: { lte: new Date() } }, select: { id: true }, take: 50, orderBy: { scheduledAt: 'asc' } });
+  for (const post of due) await publishPost(post.id, true).catch(error => console.error('[scheduler]', post.id, error.message));
 }
 
 // ─── Retention purge ──────────────────────────────────────────────────────────
@@ -193,11 +50,11 @@ function mediaUrlsOf(variants: { bannerUrl: string | null; blocks: unknown }[]):
 async function purgeExpiredPublished(): Promise<void> {
   const cutoff = new Date(Date.now() - POST_EDIT_WINDOW_MS);
 
-  let expired: { id: string; variants: { bannerUrl: string | null; blocks: unknown }[] }[];
+  let expired: { id: string; channel: { userId: string }; variants: { bannerUrl: string | null; blocks: unknown }[] }[];
   try {
     expired = await prisma.generatedPost.findMany({
       where:  { status: 'PUBLISHED', publishedAt: { lt: cutoff } },
-      select: { id: true, variants: { select: { bannerUrl: true, blocks: true } } },
+      select: { id: true, channel: { select: { userId: true } }, variants: { select: { bannerUrl: true, blocks: true } } },
       take:   100, // bound each sweep
     });
   } catch (err) {
@@ -207,16 +64,8 @@ async function purgeExpiredPublished(): Promise<void> {
   if (expired.length === 0) return;
 
   for (const post of expired) {
-    // Best-effort media cleanup — a failed delete never blocks the row removal.
-    for (const url of mediaUrlsOf(post.variants)) {
-      try { await deleteObject(url); }
-      catch (err) { console.error(`[scheduler] purge media delete failed (${url}):`, (err as Error).message); }
-    }
-    try {
-      await prisma.generatedPost.delete({ where: { id: post.id } }); // cascades to variants
-    } catch (err) {
-      console.error(`[scheduler] purge delete failed for ${post.id}:`, (err as Error).message);
-    }
+    await prisma.generatedPost.delete({ where: { id: post.id } });
+    for (const url of mediaUrlsOf(post.variants)) await deleteObject(url, post.channel.userId).catch(error => console.error('[scheduler] media cleanup', error.message));
   }
   console.log(`[scheduler] purged ${expired.length} expired published post(s)`);
 }
@@ -232,7 +81,8 @@ async function processScheduledModerationActions(): Promise<void> {
   for (const action of actions) {
     try {
       const moderatorToken = await moderatorTokenForCommunity(action.communityId);
-      if (action.actionType === 'UNMUTE_USER' && action.tgUserId) { await restrictChatUser(action.tgChatId, Number(action.tgUserId), false, moderatorToken); await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, status: 'MUTED' }, data: { status: 'ACTIVE', muteUntil: null } }); await prisma.moderationEvent.create({ data: { communityId: action.communityId, telegramUpdateId: `scheduled:${action.id}`, telegramMessageId: action.telegramMessageId, tgUserId: action.tgUserId, eventType: 'SANCTION_EXPIRED', action: 'UNMUTE', status: 'PROCESSED' } }); } else if (action.actionType.startsWith('CAPTCHA_TIMEOUT') && action.tgUserId) { const claimed = await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, captchaStatus: 'PENDING' }, data: { captchaStatus: 'TIMEOUT_PROCESSING' } }); if (claimed.count !== 1) { await prisma.scheduledModerationAction.update({ where: { id: action.id }, data: { status: 'CANCELLED', completedAt: new Date() } }); continue; } if (action.actionType === 'CAPTCHA_TIMEOUT_KICK') await kickChatUser(action.tgChatId, Number(action.tgUserId), moderatorToken); await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, captchaStatus: 'TIMEOUT_PROCESSING' }, data: { captchaStatus: 'FAILED', status: action.actionType === 'CAPTCHA_TIMEOUT_KICK' ? 'REMOVED' : 'RESTRICTED' } }); await deleteBotMessage(action.tgChatId, action.telegramMessageId, moderatorToken).catch(() => undefined); await prisma.moderationEvent.create({ data: { communityId: action.communityId, telegramUpdateId: `scheduled:${action.id}`, telegramMessageId: action.telegramMessageId, tgUserId: action.tgUserId, eventType: 'CAPTCHA_TIMEOUT', action: action.actionType === 'CAPTCHA_TIMEOUT_KICK' ? 'KICK' : 'KEEP_RESTRICTED', status: 'PROCESSED' } }); } else await deleteBotMessage(action.tgChatId, action.telegramMessageId, moderatorToken);
+      if (action.actionType === 'UNMUTE_USER' && action.tgUserId) { const member = await prisma.communityMember.findUnique({ where: { communityId_tgUserId: { communityId: action.communityId, tgUserId: action.tgUserId } } }); if (!member || member.status !== 'MUTED' || !member.muteUntil || member.muteUntil > new Date() || member.muteUntil > action.executeAt) { await prisma.scheduledModerationAction.update({ where: { id: action.id }, data: { status: 'CANCELLED', completedAt: new Date() } }); continue; } // Telegram expires until_date itself; never undo a newer restriction.
+await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, status: 'MUTED', muteUntil: { lte: action.executeAt } }, data: { status: 'ACTIVE', muteUntil: null } }); await prisma.moderationEvent.create({ data: { communityId: action.communityId, telegramUpdateId: `scheduled:${action.id}`, telegramMessageId: action.telegramMessageId, tgUserId: action.tgUserId, eventType: 'SANCTION_EXPIRED', action: 'UNMUTE', status: 'PROCESSED' } }); } else if (action.actionType.startsWith('CAPTCHA_TIMEOUT') && action.tgUserId) { const claimed = await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, captchaStatus: 'PENDING' }, data: { captchaStatus: 'TIMEOUT_PROCESSING' } }); if (claimed.count !== 1) { await prisma.scheduledModerationAction.update({ where: { id: action.id }, data: { status: 'CANCELLED', completedAt: new Date() } }); continue; } if (action.actionType === 'CAPTCHA_TIMEOUT_KICK') await kickChatUser(action.tgChatId, Number(action.tgUserId), moderatorToken); await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, captchaStatus: 'TIMEOUT_PROCESSING' }, data: { captchaStatus: 'FAILED', status: action.actionType === 'CAPTCHA_TIMEOUT_KICK' ? 'REMOVED' : 'RESTRICTED' } }); await deleteBotMessage(action.tgChatId, action.telegramMessageId, moderatorToken).catch(() => undefined); await prisma.moderationEvent.create({ data: { communityId: action.communityId, telegramUpdateId: `scheduled:${action.id}`, telegramMessageId: action.telegramMessageId, tgUserId: action.tgUserId, eventType: 'CAPTCHA_TIMEOUT', action: action.actionType === 'CAPTCHA_TIMEOUT_KICK' ? 'KICK' : 'KEEP_RESTRICTED', status: 'PROCESSED' } }); } else await deleteBotMessage(action.tgChatId, action.telegramMessageId, moderatorToken);
       await prisma.scheduledModerationAction.update({ where: { id: action.id }, data: { status: 'COMPLETED', completedAt: new Date(), attempts: { increment: 1 } } });
     } catch (err) {
       if (action.actionType.startsWith('CAPTCHA_TIMEOUT') && action.tgUserId) await prisma.communityMember.updateMany({ where: { communityId: action.communityId, tgUserId: action.tgUserId, captchaStatus: 'TIMEOUT_PROCESSING' }, data: { captchaStatus: 'PENDING', status: 'RESTRICTED' } }).catch(() => undefined);

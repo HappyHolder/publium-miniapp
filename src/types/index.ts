@@ -277,7 +277,6 @@ export interface MarketStyle {
   descEn:           string
   tags:             string[]
   priceKind:        'FREE' | 'PAID'
-  priceStars:       number | null
   priceGram:        number | null
   brandAdaptive:    boolean
   recommendedMode:  'html' | 'ai' | 'ai_html'

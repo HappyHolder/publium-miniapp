@@ -47,7 +47,6 @@ Community Manager, Community Core personas and Pulse analytics.
 **Brand Kit (inside Profile → channel → Brand Kit):**
 
 - Voice Profile — language, address style, tone, post length, emoji density, word lists
-- Emoji Pack — custom Telegram emoji pack link, strict mode, allowed emoji whitelist
 - Visual Kit — brand color, logo, background/card style, banner template, watermark
 - Link Kit — product, social, and custom links with usage modes (button / inline / signature)
 - Signature — sign-off text, CTA, usage rule
@@ -71,10 +70,10 @@ app runs end to end against a real database, Telegram bot, AI, and payments.
 | Telegram bot | Live `@Publiumbot` — `/start`, auto-draft from messages, payment webhooks |
 | Publishing | Real Telegram Bot API send (`POST /api/posts/publish`) |
 | Scheduling | In-process 60s poller auto-publishes due posts (`server/src/lib/scheduler.ts`) |
-| Payments | Telegram Stars (XTR) + TON via TonConnect; promo codes; tiers Free / Starter / Creator / Studio Pro |
+| Payments | TON via TonConnect; promo codes; tiers Free / Starter / Creator / Studio Pro |
 
-In a plain browser (no Telegram `initData`) the app still runs in **mock mode** with
-`src/data/mockData.ts`, so the UI is developable without Telegram.
+In development a plain browser can run in **mock mode** with
+`src/data/mockData.ts`. Production requires Telegram authentication; local production previews may explicitly use `?mock=1` on localhost.
 
 ### Frontend ↔ backend boundary
 
@@ -103,3 +102,7 @@ in Telegram mode `AppContext` hydrates from `/api/auth/telegram` and `/api/posts
 - **Orange-only accent:** `#FF6A00`
 - Floating glass capsule bottom nav with safe-area inset support
 - Mobile-first, tested at 375 / 390 / 430px widths
+
+## Current operations (2026-09-12)
+
+Payments use TON only. See [deployment](deploy/README.md) and [remediation report](docs/audit-remediation-2026-09-12.md) for release checks, historical Stars notices and payment/publication reconciliation.

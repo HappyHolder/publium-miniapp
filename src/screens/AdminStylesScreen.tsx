@@ -17,7 +17,7 @@ type Draft = Partial<MarketStyle>
 
 const EMPTY_DRAFT: Draft = {
   slug: '', nameRu: '', nameEn: '', descRu: '', descEn: '', tags: [],
-  priceKind: 'FREE', priceStars: null, priceGram: null,
+  priceKind: 'FREE', priceGram: null,
   brandAdaptive: true, recommendedMode: 'html', palette: [], visualCoverStyle: '',
   templates: [], published: false, sortOrder: 0,
 }
@@ -139,7 +139,7 @@ export function AdminStylesScreen({ onBack }: AdminStylesScreenProps) {
                   <div className="flex-1 min-w-0">
                     <p className="text-[13px] font-medium text-white truncate">{isRu ? s.nameRu : s.nameEn} <span className="text-[#55555D]">/{s.slug}</span></p>
                     <p className="text-[11px] text-[#55555D]">
-                      {s.published ? (isRu ? 'Опубликован' : 'Published') : (isRu ? 'Черновик' : 'Draft')} · {s.priceKind === 'FREE' ? 'Free' : (s.priceStars ? `${s.priceStars}⭐` : '') + (s.priceGram ? ` ${s.priceGram}G` : '')} · {s.templates.length} tpl
+                      {s.published ? (isRu ? 'Опубликован' : 'Published') : (isRu ? 'Черновик' : 'Draft')} · {s.priceKind === 'FREE' ? 'Free' : (s.priceGram ? `${s.priceGram} TON` : '')} · {s.templates.length} tpl
                     </p>
                   </div>
                   <button onClick={() => setDraft(s)} className="p-2 text-[#A1A1AA] hover:text-white"><Pencil size={14} /></button>
@@ -205,10 +205,7 @@ export function AdminStylesScreen({ onBack }: AdminStylesScreenProps) {
         />
         {draft.priceKind === 'PAID' && (
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Stars ⭐">
-              <input type="number" value={draft.priceStars ?? ''} onChange={e => set('priceStars', e.target.value ? Number(e.target.value) : null)} className="glass-input w-full px-3 py-2 text-sm" />
-            </Field>
-            <Field label="Gram">
+            <Field label="TON">
               <input type="number" step="0.1" value={draft.priceGram ?? ''} onChange={e => set('priceGram', e.target.value ? Number(e.target.value) : null)} className="glass-input w-full px-3 py-2 text-sm" />
             </Field>
           </div>

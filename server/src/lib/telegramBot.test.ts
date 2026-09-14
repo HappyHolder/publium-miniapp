@@ -1,3 +1,7 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { env } from '../env';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { answerInlinePostQuery, buildPreparedRichMessage, savePreparedPostMessage } from './telegramBot';
@@ -70,8 +74,13 @@ test('caches a 4x4 gallery in Telegram and prepares it with file_ids', async () 
   let albumCalls = 0;
   let deleteCalls = 0;
   let nextMessageId = 100;
-  const urls = Array.from({ length: 16 }, (_, index) => `https://media.test/tile-${index}.png`);
+  const prefix = `audit-test-${randomUUID()}`;
+  const names = Array.from({ length: 16 }, (_, index) => `${prefix}-${index}.png`);
+  const urls = names.map(name => `${env.PUBLIC_BASE_URL}/uploads/${name}`);
   const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+
+  await fs.mkdir(env.STORAGE_DIR, { recursive: true });
+  await Promise.all(names.map(name => fs.writeFile(path.join(env.STORAGE_DIR, name), tinyPng)));
 
   globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input);
@@ -137,6 +146,7 @@ test('caches a 4x4 gallery in Telegram and prepares it with file_ids', async () 
     assert.ok(rich.html.includes('tg://photo?id=photo_16'));
   } finally {
     globalThis.fetch = originalFetch;
+    await Promise.all(names.map(name => fs.unlink(path.join(env.STORAGE_DIR, name)).catch(() => undefined)));
   }
 });
 

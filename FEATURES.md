@@ -83,21 +83,21 @@ publishes or schedules it to the user's channel.
 
 ## 8. Styles market (`StylesScreen`)
 - **Cover-style packs** — browse & apply curated packs (Crypto, CYBR, Publium signature). `POST /api/styles/list`.
-- **Purchase** via Telegram Stars or TON; free packs seeded. `payments/*-style-invoice`, `payments/ton/verify-style`.
+- **Purchase** via TON orders; free packs are available without purchase. Server checks paid and showcase pack access. `POST /api/payments/ton/orders`, `POST /api/payments/ton/orders/:id/verify`.
 - **Apply** = replace the channel's cover fields, keep the channel logo.
 
 ## 9. Publishing & scheduling
 - **Publish now** to the channel via Rich Message. `POST /api/posts/publish`.
 - **5-hour edit window** — a published post stays editable and can be re-published **in place** (edits the same channel message, keeps views/reactions/position). `POST /api/posts/:postId/republish`.
 - **Schedule** to a date/time; **auto-publish** by the background scheduler. `POST /api/posts/schedule` + `scheduler.ts`.
-- **Fast Share** — send a post via Telegram's native share dialog without connecting a channel. `POST /api/posts/:postId/prepare-share`.
+- **Fast Share** — send a post via Telegram's native share dialog to another destination from an existing post. `POST /api/posts/:postId/prepare-share`.
 - **Posts tabs** — Новые / Отложка / **Архив**; Archive card has an **Edit** action within the 5-hour window.
 - **Retention** — published posts (and their media) are purged after the 5-hour window so data doesn't accumulate.
 - **Variants** — multiple AI text variants per post; select the one to publish. `select-variant`, `update-variant`, `regenerate-text`.
 
 ## 10. Monetization & plans (`PlansScreen`)
 - **Subscription tiers** with monthly AI quotas (posts / creates). `POST /api/payments/subscription`.
-- **Payments** — Telegram Stars invoices + TON on-chain verification (double-credit guarded). `payments/stars/*`, `payments/ton/verify`.
+- **Payments** — TON only. Orders fix the product, recipient, amount and unique comment; one shared transaction ledger prevents reuse across purchases.
 - **Promo codes** — redeem for plan benefits. `POST /api/promo/redeem`.
 
 ## 11. Admin panel (`AdminPanelScreen`, admin-only)
@@ -113,3 +113,7 @@ publishes or schedules it to the user's channel.
 ---
 
 _Last updated: 2026-08-03._
+
+## Reliability update — 2026-09-12
+
+Publication uses a shared database claim and retained publication history. Content-plan cancellation and quota refunds are transactional. Independent chat context follows ChannelChatLink. Configuration saves are confirmed by the server; heavy screens load on demand. See docs/audit-remediation-2026-09-12.md.

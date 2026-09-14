@@ -1,4 +1,7 @@
-import { Router, Request, Response } from 'express';
+import { publishPost } from '../lib/publication';
+import { assertMediaAccess } from '../lib/mediaAccess';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import multer from 'multer';
 import sharp from 'sharp';
 import { putObject, deleteObject } from '../lib/storage';
@@ -79,6 +82,17 @@ const uploadDocumentMiddleware = multer({
   },
 });
 const router = Router();
+router.use(async (req, res, next) => {
+  try {
+    if (typeof req.body?.initData === 'string') {
+      let telegramId: string | undefined;
+      try { telegramId = String(validateAndParseTelegramInitData(req.body.initData, env.TELEGRAM_BOT_TOKEN).user.id); } catch { return next(); }
+      const user = await prisma.user.findUnique({ where: { telegramId }, select: { id: true } });
+      if (user) { const { initData, ...data } = req.body; await assertMediaAccess(data, user.id); }
+    }
+    next();
+  } catch (error) { next(error); }
+});
 
 // ─── Local helpers ────────────────────────────────────────────────────────────
 
@@ -565,110 +579,7 @@ router.post('/publish', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  // ── 6. Idempotency guard — prevent double publish ────────────────────────
-  if (post.status === 'PUBLISHED') {
-    res.status(409).json({ error: 'Post is already published.' });
-    return;
-  }
-
-  // ── 7. Resolve variant text ───────────────────────────────────────────────
-  const selectedVariant =
-    post.variants.find(v => v.id === post!.selectedVariantId) ?? post.variants[0];
-
-  // Publishable when there's variant text OR structured blocks (a manually built
-  // post has empty text but real blocks — its content lives entirely in blocks).
-  if (!selectedVariant?.text?.trim() && !variantBlocks(selectedVariant)) {
-    res.status(400).json({ error: 'Post has no content to publish.' });
-    return;
-  }
-
-  // ── 8. Resolve the Telegram target ───────────────────────────────────────
-  // Prefer the stable numeric chat id (survives channel renames); fall back to
-  // @handle for channels connected before we stored the id.
-  if (!post.channel.tgChatId && !post.channel.handle) {
-    res.status(500).json({ error: 'У канала нет id и @username — переподключите его в профиле.' });
-    return;
-  }
-  const channelTarget = post.channel.tgChatId ?? `@${post.channel.handle}`;
-
-  // ── 9. Build optional inline keyboard from stored link buttons ───────────
-  // linkButtons was populated from BrandKit at draft-creation time (and edited
-  // in the composer) and stored as Json in GeneratedPost.
-  const replyMarkup = buildInlineKeyboard(post.linkButtons);
-
-  // ── 10. Send to Telegram channel ─────────────────────────────────────────
-  // DB is only updated AFTER a successful Telegram delivery so status never
-  // shows PUBLISHED for a message that was never actually sent.
-  // sendChannelPost picks the method: short post → native photo+caption;
-  // long post → full text message with the cover as a large preview card.
-  let sentRef: Awaited<ReturnType<typeof sendRichChannelPost>> = null;
-  try {
-    const blocks = variantBlocks(selectedVariant);
-    if (blocks) {
-      // Formatted post — structured blocks → Rich Message (with internal fallback
-      // to the legacy plain path inside sendRichChannelPost if the API rejects it).
-      sentRef = await sendRichChannelPost({
-        chatId:      channelTarget,
-        blocks,
-        title:       post.title,
-        siteName:    post.channel.name || post.channel.handle || undefined,
-        token:       env.TELEGRAM_BOT_TOKEN,
-        replyMarkup,
-      });
-    } else {
-      // Legacy posts created before formatting existed (no stored blocks).
-      sentRef = await sendChannelPost({
-        chatId:      channelTarget,
-        text:        selectedVariant.text,
-        bannerUrl:   selectedVariant.bannerUrl,
-        title:       post.title,
-        siteName:    post.channel.name || post.channel.handle || undefined,
-        token:       env.TELEGRAM_BOT_TOKEN,
-        replyMarkup,
-      });
-    }
-  } catch (err) {
-    const msg = err instanceof TelegramApiError
-      ? err.message
-      : (err as Error).message ?? 'Telegram API error';
-    console.error('[posts/publish] Telegram send failed:', msg);
-    res.status(502).json({ error: friendlyPublishError(msg) });
-    return;
-  }
-
-  // Self-heal: remember the numeric chat id from the successful send so future
-  // publishes go by id (rename-proof), even for channels connected before this.
-  if (!post.channel.tgChatId && sentRef?.chatId) {
-    prisma.channel.update({ where: { id: post.channel.id }, data: { tgChatId: String(sentRef.chatId) } })
-      .catch(err => console.error('[posts/publish] tgChatId backfill failed:', (err as Error).message));
-  }
-
-  // ── 11. Persist PUBLISHED status ─────────────────────────────────────────
-  // Also store the sent message ref so the post can be edited in place during
-  // its 5-hour re-publish window (POST /:postId/republish).
-  const publishedAt = new Date();
-  try {
-    await prisma.generatedPost.update({
-      where: { id: postId },
-      data:  {
-        status:      'PUBLISHED',
-        publishedAt,
-        tgChatId:    sentRef ? String(sentRef.chatId) : null,
-        tgMessageId: sentRef?.messageId ?? null,
-      },
-    });
-  } catch (err) {
-    console.error('[posts/publish] DB update failed:', (err as Error).message);
-    // The message was already delivered to Telegram. Return 500 so the
-    // frontend knows the persisted state is inconsistent and can show a warning.
-    res.status(500).json({
-      error: 'Post was sent to Telegram but status could not be saved. Please reload the app.',
-    });
-    return;
-  }
-
-  // ── 12. Return updated post fields ───────────────────────────────────────
-  await queuePublishedPostContentSupport(postId).catch(err=>console.error('[posts/publish] CM content release queue failed:',(err as Error).message));
+  const publishedAt = await publishPost(postId);
 
   res.json({
     post: {
@@ -1647,10 +1558,11 @@ router.post('/schedule', async (req: Request, res: Response): Promise<void> => {
 
   // ── 6. Persist SCHEDULED status + scheduledAt ─────────────────────────────
   try {
-    await prisma.generatedPost.update({
-      where: { id: postId },
-      data:  { status: 'SCHEDULED', scheduledAt },
+    const scheduled = await prisma.generatedPost.updateMany({
+      where: { id: postId, publishState: 'IDLE', status: { in: ['NEW', 'SCHEDULED', 'FAILED'] } },
+      data: { status: 'SCHEDULED', scheduledAt },
     });
+    if (!scheduled.count) { res.status(409).json({ error: 'Публикация уже началась или завершена.' }); return; }
   } catch (err) {
     console.error('[posts/schedule] DB update failed:', (err as Error).message);
     res.status(500).json({ error: 'Internal server error' }); return;
@@ -1706,10 +1618,11 @@ router.post('/cancel-schedule', async (req: Request, res: Response): Promise<voi
   }
 
   try {
-    await prisma.generatedPost.update({
-      where: { id: postId },
+    const cancelled = await prisma.generatedPost.updateMany({
+      where: { id: postId, status: 'SCHEDULED', publishState: 'IDLE' },
       data: { status: 'NEW', scheduledAt: null },
     });
+    if (!cancelled.count) { res.status(409).json({ error: 'Публикация уже началась или отменена.' }); return; }
   } catch (err) {
     console.error('[posts/cancel-schedule] DB update failed:', (err as Error).message);
     res.status(500).json({ error: 'Internal server error' }); return;
@@ -1795,7 +1708,8 @@ router.post('/delete', async (req: Request, res: Response): Promise<void> => {
 
   // ── 5. Delete post (cascade removes PostVariant rows automatically) ───────
   try {
-    await prisma.generatedPost.delete({ where: { id: postId } });
+    const deleted = await prisma.generatedPost.deleteMany({ where: { id: postId, publishState: 'IDLE' } });
+    if (!deleted.count) { res.status(409).json({ error: 'Пост отправляется или требует проверки результата отправки.' }); return; }
   } catch (err) {
     console.error('[posts/delete] Delete failed:', (err as Error).message);
     res.status(500).json({ error: 'Internal server error' }); return;
@@ -1804,7 +1718,7 @@ router.post('/delete', async (req: Request, res: Response): Promise<void> => {
   // ── 6. Best-effort: remove the post's stored media files (cover + block media)
   // so deleted posts don't leave orphaned files growing on disk. Non-fatal.
   try {
-    await Promise.all(collectMediaUrls(post.variants).map(deleteObject));
+    await Promise.all(collectMediaUrls(post.variants).map(url => deleteObject(url, dbUser.id)));
   } catch (err) {
     console.warn('[posts/delete] media cleanup failed (non-fatal):', (err as Error).message);
   }

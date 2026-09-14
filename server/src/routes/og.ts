@@ -1,3 +1,4 @@
+import { Router } from '../lib/asyncRouter';
 /**
  * og.ts
  *
@@ -12,7 +13,7 @@
  * own /uploads origin are accepted.
  */
 
-import { Router, Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { env } from '../env';
 
 const router = Router();

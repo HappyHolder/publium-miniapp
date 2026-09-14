@@ -1,4 +1,5 @@
-import { Router, type Request, type Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { type Request, type Response } from 'express';
 import multer from 'multer';
 import { prisma } from '../db';
 import { verifyModeratorSession } from '../lib/moderatorSession';

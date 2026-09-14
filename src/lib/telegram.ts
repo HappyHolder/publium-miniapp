@@ -10,7 +10,6 @@ interface TelegramWebApp {
   version?: string
   platform?: string
   ready?: () => void
-  openInvoice?: (url: string, callback: (status: string) => void) => void
   shareMessage?: (msgId: string, callback?: (sent: boolean) => void) => void
   switchInlineQuery?: (query: string, chooseChatTypes?: Array<'users' | 'bots' | 'groups' | 'channels'>) => void
   onEvent?: (eventType: string, eventHandler: (eventData?: unknown) => void) => void
@@ -106,16 +105,7 @@ export function notifyTelegramReady(): void {
   }
 }
 
-/**
- * Opens the native Telegram Stars invoice. Returns false (no-op) when not running
- * inside Telegram or the method is unavailable, so callers can show a fallback.
- */
-export function openTelegramInvoice(url: string, callback: (status: string) => void): boolean {
-  const wa = getWebApp()
-  if (!wa?.openInvoice) return false
-  wa.openInvoice(url, callback)
-  return true
-}
+
 
 export function isTelegramIOS(): boolean {
   return getWebApp()?.platform?.toLowerCase() === 'ios'

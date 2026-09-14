@@ -1,4 +1,8 @@
-import { Router, Request, Response } from 'express';
+import { assertStyleAccess } from '../lib/styleAccess';
+import { assertMediaAccess } from '../lib/mediaAccess';
+import { reserveSubscriptionQuota, refundSubscriptionQuota } from '../lib/subscriptionLimits';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import multer from 'multer';
 import { putObject } from '../lib/storage';
 import { prisma } from '../db';
@@ -421,6 +425,9 @@ router.patch('/:channelId', async (req: Request, res: Response): Promise<void> =
     return;
   }
 
+  await assertStyleAccess(dbUser.id, updateData.visualKit);
+  await assertMediaAccess(updateData, dbUser.id);
+
   // ── 6. Upsert BrandKit — write only the provided sections ────────────────
   // The values are JSON-parsed objects from Express, compatible with Prisma's
   // Json? column type at runtime. `as any` avoids re-typing the generated
@@ -463,13 +470,15 @@ router.post('/generate-cover-style', async (req: Request, res: Response): Promis
   const dbUser = await prisma.user.findUnique({ where: { telegramId }, select: { id: true } }).catch(() => null);
   if (!dbUser) { res.status(401).json({ error: 'User not found' }); return; }
 
+  const channel = await prisma.channel.findFirst({ where: { id: channelId, userId: dbUser.id }, select: { id: true } });
+  if (!channel) { res.status(404).json({ error: 'Channel not found' }); return; }
   // Load BrandKit for context
   const bk = await prisma.brandKit.findUnique({
     where:  { channelId: channelId as string },
     select: { channelAbout: true, visualKit: true },
   }).catch(() => null);
 
-  if (!env.DEEPSEEK_API_KEY) { res.status(503).json({ error: 'AI not configured' }); return; }
+  if (!env.OPENAI_API_KEY) { res.status(503).json({ error: 'AI not configured' }); return; }
 
   // Build context from BrandKit
   const vk = (visualKit ?? bk?.visualKit ?? {}) as Record<string, unknown>;
@@ -508,6 +517,8 @@ router.post('/generate-cover-style', async (req: Request, res: Response): Promis
 
   const userPrompt = contextParts.join('\n') + '\n\nWrite the cover style description:';
 
+  const quota = await reserveSubscriptionQuota(dbUser.id, 'assistant');
+  if (!quota.ok) { res.status(429).json({ error: 'Лимит AI исчерпан.' }); return; }
   try {
     const style = (await terraText({
       system: systemPrompt,
@@ -518,6 +529,7 @@ router.post('/generate-cover-style', async (req: Request, res: Response): Promis
     }))?.trim() ?? '';
     res.json({ style });
   } catch (err) {
+    await refundSubscriptionQuota(dbUser.id, 'assistant');
     console.error('[brandkits/generate-cover-style] Error:', (err as Error).message);
     res.status(500).json({ error: 'Generation failed' });
   }

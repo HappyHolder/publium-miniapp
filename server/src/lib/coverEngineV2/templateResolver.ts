@@ -1,3 +1,5 @@
+import { templateFetch } from '../templateFetch';
+import { publicFetch } from '../publicFetch';
 ﻿import { selectHtmlTemplate } from '../aiGenerator';
 import type { CoverContextV2, HtmlTemplateRef, RubricRef } from './types';
 
@@ -17,7 +19,7 @@ export async function resolveTemplateV2(
 export async function fetchTemplateHtmlV2(template: HtmlTemplateRef | null): Promise<string | null> {
   if (!template) return null;
   try {
-    const response = await fetch(template.url);
+    const response = await templateFetch(template.url);
     if (!response.ok) return null;
     return await response.text();
   } catch {

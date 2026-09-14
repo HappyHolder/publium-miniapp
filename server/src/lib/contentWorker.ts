@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { refundItem } from './contentPlanQuota';
+import { storageOwner } from './storageContext';
 /**
  * contentWorker.ts
  *
@@ -15,7 +18,6 @@
 import { prisma } from '../db';
 import { research } from './researchEngine';
 import { createDraftPostForChannel } from './draftGenerator';
-import { refundSubscriptionQuota } from './subscriptionLimits';
 
 // ─── Single-flight queue (one plan at a time per process) ────────────────────
 const queue: string[] = [];
@@ -39,7 +41,7 @@ async function pump(): Promise<void> {
         console.error(`[contentWorker] plan ${planId} crashed:`, (err as Error).message);
         await prisma.contentPlan.update({
           where: { id: planId },
-          data:  { status: 'FAILED', errorMessage: (err as Error).message.slice(0, 500) },
+          data:  { errorMessage: (err as Error).message.slice(0, 500) },
         }).catch(() => {});
       }
     }
@@ -82,6 +84,14 @@ function composeInput(workingTitle: string, angle: string, material: string): st
  * partially-done plan (resume): DONE/SKIPPED items are left untouched.
  */
 export async function runContentPlan(planId: string): Promise<void> {
+  const leaseOwner = randomUUID();
+  const claimed = await prisma.contentPlan.updateMany({ where: { id: planId, status: 'GENERATING', OR: [{ leaseUntil: null }, { leaseUntil: { lt: new Date() } }] }, data: { leaseOwner, leaseUntil: new Date(Date.now() + 300_000) } });
+  if (!claimed.count) return;
+  const timer = setInterval(() => { void prisma.contentPlan.updateMany({ where: { id: planId, leaseOwner }, data: { leaseUntil: new Date(Date.now() + 300_000) } }).catch(error => console.error('[contentWorker] lease renewal failed', error.message)); }, 60_000);
+  try { await runClaimedPlan(planId, leaseOwner); }
+  finally { clearInterval(timer); await prisma.contentPlan.updateMany({ where: { id: planId, leaseOwner }, data: { leaseUntil: null, leaseOwner: null } }); }
+}
+async function runClaimedPlan(planId: string, leaseOwner: string): Promise<void> {
   const plan = await prisma.contentPlan.findUnique({
     where:   { id: planId },
     include: { items: { orderBy: { orderIndex: 'asc' } } },
@@ -103,17 +113,19 @@ export async function runContentPlan(planId: string): Promise<void> {
     if (item.status === 'DONE' || item.status === 'SKIPPED') continue;
 
     // Re-check cancellation before each item — cancel just flips the plan status.
-    const fresh = await prisma.contentPlan.findUnique({ where: { id: planId }, select: { status: true } });
-    if (fresh?.status === 'CANCELLED') { console.log(`[contentWorker] plan ${planId} cancelled — stopping`); return; }
+    const fresh = await prisma.contentPlan.findUnique({ where: { id: planId } });
+    if (fresh?.status !== 'GENERATING' || fresh.leaseOwner !== leaseOwner) return;
 
     try {
       // 1. Research ------------------------------------------------------------
       await prisma.contentPlanItem.update({ where: { id: item.id }, data: { status: 'RESEARCHING' } });
       const r = await research(item.searchQuery, docContext ? { extraContext: docContext } : {});
+      const afterResearch = await prisma.contentPlan.findUnique({ where: { id: planId } });
+      if (afterResearch?.status !== 'GENERATING' || afterResearch.leaseOwner !== leaseOwner) return;
 
       // 2. Generate (text + cover by rubric + rich blocks) ---------------------
       await prisma.contentPlanItem.update({ where: { id: item.id }, data: { status: 'GENERATING' } });
-      const draft = await createDraftPostForChannel({
+      const draft = await storageOwner.run(channel.userId, () => createDraftPostForChannel({
         channelId:   plan.channelId,
         input:       composeInput(item.workingTitle, item.angle, r.text),
         sourceType:  'plan',
@@ -122,35 +134,38 @@ export async function runContentPlan(planId: string): Promise<void> {
         allowHtmlCovers: plan.generateVisuals,
         generateVisual: plan.generateVisuals,
         forcedRubric: item.rubricId ? { id: item.rubricId, name: item.rubricName ?? '' } : undefined,
+      }));
+
+      // Lock the same plan row as cancellation. Record the post and item together.
+      await prisma.$transaction(async tx => {
+        await tx.$queryRaw`SELECT id FROM "ContentPlan" WHERE id = ${planId} FOR UPDATE`;
+        const current = await tx.contentPlan.findUniqueOrThrow({ where: { id: planId } });
+        // A replacement worker owns the item now. Keep this result as a draft.
+        if (current.leaseOwner !== leaseOwner) return;
+        const canSchedule = current.status === 'GENERATING' && current.leaseOwner === leaseOwner;
+        await tx.generatedPost.update({ where: { id: draft.id }, data: { status: canSchedule ? 'SCHEDULED' : 'NEW', scheduledAt: canSchedule ? item.scheduledAt : null, sourceType: 'plan' } });
+        if (!canSchedule) await refundItem(tx, item.id, channel.userId);
+        await tx.contentPlanItem.update({ where: { id: item.id }, data: { status: canSchedule ? 'DONE' : 'SKIPPED', generatedPostId: draft.id, contentReserved: false, visualReserved: false, errorMessage: canSchedule ? null : 'План отменён; результат сохранён в черновиках.' } });
       });
 
-      // 3. Schedule the post into Отложка at the item's slot -------------------
-      await prisma.generatedPost.update({
-        where: { id: draft.id },
-        data:  { status: 'SCHEDULED', scheduledAt: item.scheduledAt, sourceType: 'plan' },
-      });
-
-      await prisma.contentPlanItem.update({
-        where: { id: item.id },
-        data:  { status: 'DONE', generatedPostId: draft.id, errorMessage: null },
-      });
       console.log(`[contentWorker] plan ${planId} item ${item.orderIndex + 1}/${plan.items.length} → scheduled ${draft.id}`);
     } catch (err) {
       // A single bad item never sinks the plan — mark SKIPPED and move on.
-      await refundSubscriptionQuota(channel.userId, 'contentManagerPosts');
-      if (plan.generateVisuals) await refundSubscriptionQuota(channel.userId, 'visual');
       console.error(`[contentWorker] plan ${planId} item ${item.id} failed:`, (err as Error).message);
-      await prisma.contentPlanItem.update({
-        where: { id: item.id },
-        data:  { status: 'SKIPPED', errorMessage: (err as Error).message.slice(0, 500) },
-      }).catch(() => {});
+      await prisma.$transaction(async tx => {
+        await tx.$queryRaw`SELECT id FROM "ContentPlan" WHERE id = ${planId} FOR UPDATE`;
+        const current = await tx.contentPlan.findUnique({ where: { id: planId } });
+        if (current?.leaseOwner !== leaseOwner) return;
+        await refundItem(tx, item.id, channel.userId);
+        await tx.contentPlanItem.update({ where: { id: item.id }, data: { status: 'SKIPPED', errorMessage: (err as Error).message.slice(0, 500) } });
+      });
     }
   }
 
   // Final cancellation check before flipping to SCHEDULED.
   const done = await prisma.contentPlan.findUnique({ where: { id: planId }, select: { status: true } });
   if (done?.status === 'CANCELLED') return;
-  await prisma.contentPlan.update({ where: { id: planId }, data: { status: 'SCHEDULED' } });
+  await prisma.contentPlan.updateMany({ where: { id: planId, status: 'GENERATING', leaseOwner }, data: { status: 'SCHEDULED' } });
   console.log(`[contentWorker] plan ${planId} complete → SCHEDULED`);
 }
 

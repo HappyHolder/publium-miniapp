@@ -28,8 +28,7 @@ Internet ──443──> Caddy ──/api/*──> api:8787 ──> db:5432
    cp .env.example .env
    nano .env        # set DOMAIN, a strong POSTGRES_PASSWORD, and all secrets
    ```
-   Pull the secrets (`DEEPSEEK_API_KEY`, `REPLICATE_API_TOKEN`, Telegram token of @Publiumbot,
-   `TELEGRAM_WEBHOOK_SECRET`, TON keys) from the old Render dashboard before it is shut down.
+   Configure `OPENAI_API_KEY`, Telegram tokens/secrets, `MANAGED_BOT_ENCRYPTION_KEY` and TON wallet/API key. Replicate is optional for panoramas. Keep live secrets in `deploy/.env`; never print or commit them.
 
 4. **Bring the stack up:**
    ```bash
@@ -76,3 +75,20 @@ docker compose down               # stop (volumes are kept)
 ```
 
 Backups: snapshot the `pgdata` and `uploads` volumes regularly.
+
+## Release procedure (verified 2026-09-12)
+
+Production: `root@45.146.165.97`, repository `/opt/publium`. Use the existing SSH key (`~/.ssh/id_ed25519`); do not copy the private key or put it in the repository.
+
+1. Run types, unit/integration tests and the production frontend smoke test. CI repeats these checks.
+2. Inspect remote git status and container health. Preserve server-local files and environment.
+3. Before schema changes, create a PostgreSQL custom-format dump and verify it can be restored to an isolated database. Preserve the previous API/web images for rollback.
+4. Push the reviewed release, then `git pull --ff-only origin main` in `/opt/publium`.
+5. From `/opt/publium/deploy`, run `docker compose up -d --build`. API applies additive migrations on boot.
+6. Check `docker compose ps`, `/api/health`, migration status, frontend assets and recent API logs. Do not publish real messages or make real purchases as smoke tests.
+
+Only TON orders can create new purchases. Historical Stars tables remain for accounting; late paid notices are stored in `LegacyPaymentNotice` for manual reconciliation. Old Stars checkout is rejected.
+
+`PublicationRecord.status = UNCERTAIN` (or a stale `SENDING`) requires checking the actual Telegram channel before an operator resets a post for retry. Never bulk-reset these records: the message may already be delivered.
+
+Backups and rollback images contain production data/configuration references: store them on the server with restricted permissions. A database rollback requires an explicit recovery decision; additive migrations normally allow rolling the application back without deleting new tables.

@@ -30,31 +30,6 @@ export function isStyleOwned(style: MarketStyle, owned: string[]): boolean {
 
 // ─── Purchase ──────────────────────────────────────────────────────────────────
 
-/** Creates a Telegram Stars invoice for a style. Returns the invoice URL. */
-export async function createStyleStarsInvoice(styleId: string): Promise<string> {
-  const initData = getTelegramInitData()
-  const res = await fetch(`${API_BASE}/api/payments/stars/create-style-invoice`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ initData, styleId }),
-  })
-  const data = await res.json().catch(() => ({})) as { invoiceUrl?: string; error?: string }
-  if (!res.ok || !data.invoiceUrl) throw new Error(data.error ?? 'Failed to create invoice')
-  return data.invoiceUrl
-}
-
-/** Verifies a TON (Gram) payment for a style after sendTransaction. */
-export async function verifyStyleTon(styleId: string, senderWallet: string): Promise<void> {
-  const initData = getTelegramInitData()
-  const res = await fetch(`${API_BASE}/api/payments/ton/verify-style`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ initData, styleId, senderWallet }),
-  })
-  const data = await res.json().catch(() => ({})) as { owned?: boolean; error?: string }
-  if (!res.ok || !data.owned) throw new Error(data.error ?? 'Payment not found')
-}
-
 // ─── Apply ─────────────────────────────────────────────────────────────────────
 
 /**

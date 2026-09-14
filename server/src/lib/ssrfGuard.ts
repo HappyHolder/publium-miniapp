@@ -19,10 +19,14 @@ export function isPrivateIp(ip: string): boolean {
 
   if (net.isIPv6(v)) {
     if (v === '::1' || v === '::') return true;                 // loopback / unspecified
-    if (v.startsWith('fe80')) return true;                      // link-local
+    if (/^fe[89ab]/.test(v)) return true;                      // link-local
     if (v.startsWith('fc') || v.startsWith('fd')) return true;  // unique-local (ULA)
     const mapped = v.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);     // IPv4-mapped
     if (mapped && mapped[1]) return isPrivateIp(mapped[1]);
+    const normalized = new URL(`http://[${v}]/`).hostname.slice(1, -1);
+    const hex = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) { const a = parseInt(hex[1]!, 16), b = parseInt(hex[2]!, 16); return isPrivateIp(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`); }
+    if (v.startsWith('ff') || v.startsWith('2001:db8:')) return true;
     return false;
   }
 
@@ -31,6 +35,7 @@ export function isPrivateIp(ip: string): boolean {
     return true; // not a clean IPv4 literal → treat as unsafe
   }
   const [a, b] = parts as [number, number];
+  if (a >= 224) return true;
   if (a === 0)   return true;                       // 0.0.0.0/8
   if (a === 10)  return true;                       // 10/8 private
   if (a === 127) return true;                       // loopback

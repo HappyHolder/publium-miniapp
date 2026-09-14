@@ -1,3 +1,4 @@
+import { hydrateLinkedChannel } from './channelContext';
 import { prisma } from '../db';
 import { primaryTextModel } from '../lib/assistantModel';
 import { sendBotMessage, setBotMessageReaction } from '../lib/telegramBot';
@@ -25,6 +26,7 @@ const enabledFor=(config:ReturnType<typeof parseCommunityManagerConfig>,type:Com
 export async function runActivity(managerId:string,type:CommunityActivityType,topic?:string,meta:ActivityMeta={}){
   const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{moderatorChat:true,chat:true,channel:true}}}});
   if(!manager?.enabled||!manager.publishedVersion||!manager.community.moderatorChat)throw new Error('CM is not active');
+  await hydrateLinkedChannel(manager.community);
   const ownerUserId=manager.community.chat?.userId??manager.community.channel?.userId,channelName=manager.community.chat?.title??manager.community.channel?.name??'сообщество';if(!ownerUserId)throw new Error('Community owner not found');
   const subscription=await getEffectiveSubscription(ownerUserId);if(!TIER_LIMITS[subscription.tier].canUseCommunityManager)throw new Error('CM requires Starter or higher');
   const row=await prisma.communityManagerConfig.findUnique({where:{communityManagerId_version:{communityManagerId:manager.id,version:manager.publishedVersion}}});if(!row)throw new Error('Config not applied');

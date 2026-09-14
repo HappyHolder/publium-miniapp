@@ -19,6 +19,12 @@
 		reverse_proxy api:8787
 	}
 
+	# Templates are read from storage by the renderer, never distributed as public assets.
+	@templates path_regexp templates (?i)^/uploads/.*\.(html?|xhtml)$
+	handle @templates {
+		respond "Not found" 404
+	}
+
 	# Uploaded & generated files (covers, logos, templates).
 	handle /uploads/* {
 		root * /srv

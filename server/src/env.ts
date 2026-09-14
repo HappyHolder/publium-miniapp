@@ -25,14 +25,9 @@ if (process.env['NODE_ENV'] === 'production' && Buffer.byteLength(process.env['M
 
 const IMAGE_PROVIDER = (process.env['IMAGE_PROVIDER'] ?? 'none') as 'none' | 'replicate';
 
-// Deep-research backend for the AI content manager. 'opus' uses the Anthropic
-// SDK with native web_search/web_fetch server tools (needs ANTHROPIC_API_KEY);
-// 'deepseek' falls back to the existing Serper/Tavily + fetchArticle pipeline.
-// Defaults to 'opus' when a key is present, otherwise 'deepseek'.
-const CONTENT_RESEARCH_BACKEND = (
-  process.env['CONTENT_RESEARCH_BACKEND'] ??
-  (process.env['ANTHROPIC_API_KEY'] ? 'opus' : 'deepseek')
-) as 'opus' | 'deepseek';
+// Retained compatibility values for old records; research runs through OpenAI.
+const CONTENT_RESEARCH_BACKEND = 'deepseek' as const;
+if (!process.env['OPENAI_API_KEY']) console.warn('[env] OPENAI_API_KEY is absent: AI text, vision and ordinary covers are unavailable.');
 
 // Comma-separated Telegram numeric IDs allowed to access the admin panel.
 // Example: ADMIN_TELEGRAM_IDS=123456789,987654321

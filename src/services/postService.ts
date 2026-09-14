@@ -7,6 +7,8 @@ export const postService = {
     posts = [...initialPosts]
   },
 
+  remove(id: string): void { posts = posts.filter(post => post.id !== id) },
+
   getAll(): GeneratedPost[] {
     return posts
   },

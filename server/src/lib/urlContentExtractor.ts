@@ -11,7 +11,7 @@
  * callers can fall back to the original input.
  */
 
-import { assertPublicHost } from './ssrfGuard';
+import { publicFetch } from './publicFetch';
 
 export interface ExtractedArticle {
   title: string;
@@ -19,7 +19,6 @@ export interface ExtractedArticle {
 }
 
 const FETCH_TIMEOUT_MS = 9_000;
-const MAX_REDIRECTS     = 4;        // SSRF-checked redirect hops
 const MAX_HTML_BYTES    = 2_000_000; // cap parsed HTML at ~2 MB
 const MAX_TEXT_CHARS    = 4_000;     // cap content handed to the model
 
@@ -134,38 +133,7 @@ export async function fetchArticle(url: string): Promise<ExtractedArticle | null
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    // Follow redirects manually so every hop is SSRF-checked — `redirect: 'follow'`
-    // would let a public URL redirect to an internal address unchecked.
-    let current = url;
-    let res: Response | null = null;
-    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-      if (!/^https?:\/\//i.test(current)) return null;
-      let parsed: URL;
-      try { parsed = new URL(current); } catch { return null; }
-      try {
-        await assertPublicHost(parsed.hostname); // SSRF guard — blocks internal targets
-      } catch {
-        return null;
-      }
-      res = await fetch(current, {
-        signal:   controller.signal,
-        redirect: 'manual',
-        headers: {
-          // A real UA + Accept reduces bot-blocking and SPA shells.
-          'User-Agent': 'Mozilla/5.0 (compatible; PubliumBot/1.0; +https://t.me/Publiumbot)',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Accept-Language': 'ru,en;q=0.8',
-        },
-      });
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get('location');
-        if (!loc) return null;
-        current = new URL(loc, current).toString();
-        continue;
-      }
-      break;
-    }
-
+    const res = await publicFetch(url, { maxBytes: MAX_HTML_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
     if (!res || !res.ok) return null;
     const contentType = res.headers.get('content-type') ?? '';
     if (contentType && !/html|xml/i.test(contentType)) return null; // skip pdf/img/json

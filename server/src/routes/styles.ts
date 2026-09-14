@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import { Request, Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
 import { validateAndParseTelegramInitData } from '../lib/telegram';
@@ -42,7 +43,7 @@ router.post('/list', async (req: Request, res: Response): Promise<void> => {
       // `hidden` is an admin-only badge for unpublished styles. Regular users
       // never see it — a showcase-only pack (published:false, showcaseOnly:true)
       // is visible to them and must not read as "скрыт".
-      styles: styles.map(s => ({ ...serializeStyle(s), ...(isAdmin && !s.published ? { hidden: true } : {}) })),
+      styles: styles.map(s => ({ ...serializeStyle(s), ...(!isAdmin && (s.showcaseOnly || (s.priceKind === 'PAID' && !owned.includes(s.id))) ? { templates: (Array.isArray(s.templates) ? s.templates : []).map((t: any) => ({ name: t.name, url: '' })), carouselTemplate: null } : {}), ...(isAdmin && !s.published ? { hidden: true } : {}) })),
       owned,
     });
   } catch (err) {

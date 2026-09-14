@@ -61,6 +61,7 @@ app.use('/api/moderator-config', moderatorApiLimit);
 // and a safe fallback. The directory is created on boot so static serving works
 // before the first upload.
 fs.mkdirSync(env.STORAGE_DIR, { recursive: true });
+app.use('/uploads', (req, res, next) => { if (/\.(html?|xhtml)$/i.test(req.path)) { res.sendStatus(404); return; } next(); });
 app.use('/uploads', express.static(env.STORAGE_DIR, {
   maxAge: '30d',
   immutable: true,
@@ -99,6 +100,13 @@ app.use('/api/role-knowledge-docs', moderatorApiLimit, roleKnowledgeDocsRouter);
 app.use('/api/content-plan', contentPlanRouter);
 app.use('/api/og',        ogRouter);
 
+app.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) { next(error); return; }
+  const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+  console.error('[api] request failed:', error instanceof Error ? error.message : 'Unknown error');
+  res.status(status).json({ error: status < 500 ? error.message : 'Ошибка сервера. Повторите запрос.' });
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(env.PORT, () => {
   console.log(
@@ -108,6 +116,7 @@ app.listen(env.PORT, () => {
   startCommunityManagerWorker();
   startCommunityActivityScheduler();
   startCommunityCoreRuntime().catch(err => console.error('[community-core] boot failed:', (err as Error).message));
+  setInterval(() => { void resumeGeneratingPlans().catch(error => console.error('[content-worker] resume failed', error.message)); }, 60_000).unref();
   // Resume any content-manager plans interrupted by a restart.
   resumeGeneratingPlans().catch(err =>
     console.error('[content-worker] resume failed:', (err as Error).message));

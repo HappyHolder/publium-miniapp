@@ -1,3 +1,5 @@
+import { assertStyleAccess } from './styleAccess';
+import { storageOwner } from './storageContext';
 /**
  * draftGenerator.ts
  *
@@ -160,7 +162,12 @@ function extractButtonLinks(brandKit: unknown): {
  * Throws on channel-not-found or DB transaction failure.
  * Callers decide how to surface those errors to users.
  */
-export async function createDraftPostForChannel(
+export async function createDraftPostForChannel(params: CreateDraftParams): Promise<DraftPost> {
+  const owner = await prisma.channel.findUniqueOrThrow({ where: { id: params.channelId }, select: { userId: true } });
+  return storageOwner.run(owner.userId, () => createDraftInternal(params));
+}
+
+async function createDraftInternal(
   params: CreateDraftParams,
 ): Promise<DraftPost> {
   const { channelId, input, sourceType, sourceUrl, imagePrompt, useBrandKit = true, imageOnly = false, allowHtmlCovers = true, coverModeOverride, generateVisual = true, forcedRubric } = params;
@@ -170,7 +177,7 @@ export async function createDraftPostForChannel(
   // ── Load channel ──────────────────────────────────────────────────────────
   const channel = await prisma.channel.findUniqueOrThrow({
     where:  { id: channelId },
-    select: { id: true, handle: true, name: true },
+    select: { id: true, handle: true, name: true, userId: true },
   });
 
   // ── Load BrandKit (skipped when useBrandKit === false) ───────────────────
@@ -196,6 +203,8 @@ export async function createDraftPostForChannel(
       console.error('[draftGenerator] BrandKit lookup failed:', (err as Error).message);
     }
   }
+
+  await assertStyleAccess(channel.userId, (brandKit as any)?.visualKit);
 
   // ── Extract button links from BrandKit (empty when useBrandKit === false) ─
   const buttonLinks = extractButtonLinks(brandKit);

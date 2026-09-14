@@ -1,215 +1,76 @@
-import { Router, Request, Response } from 'express';
+import { Router } from '../lib/asyncRouter';
+import type { Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
 import { validateAndParseTelegramInitData } from '../lib/telegram';
-import { createStarsInvoiceLink } from '../lib/telegramBot';
 import { verifyTonDeposit } from '../lib/tonVerification';
-import {
-  pricingFor, isPaidTier, grantSubscription, serializeSub, type PaidTier,
-} from '../lib/payments';
+import { pricingFor, isPaidTier, grantSubscription, serializeSub } from '../lib/payments';
 import { getEffectiveSubscription } from '../lib/subscriptionLimits';
-import { grantStylePurchase } from '../lib/styles';
-
 const router = Router();
-
-// Display names for the paid tiers (DB enum stays STARTER/CREATOR/STUDIO_PRO).
-const TIER_DISPLAY: Record<PaidTier, string> = {
-  STARTER:    'Starter',
-  CREATOR:    'Creator',
-  STUDIO_PRO: 'Studio Pro',
-};
-const PLAN_TITLE: Record<PaidTier, string> = {
-  STARTER:    `Publium · ${TIER_DISPLAY.STARTER}`,
-  CREATOR:    `Publium · ${TIER_DISPLAY.CREATOR}`,
-  STUDIO_PRO: `Publium · ${TIER_DISPLAY.STUDIO_PRO}`,
-};
-
-/** Resolves the authenticated user from initData. Writes an error response and returns null on failure. */
-async function resolveUser(initData: unknown, res: Response): Promise<{ id: string; telegramId: string } | null> {
-  if (typeof initData !== 'string' || !initData.trim()) {
-    res.status(400).json({ error: 'initData is required' }); return null;
-  }
-  let parsed;
-  try {
-    parsed = validateAndParseTelegramInitData(initData, env.TELEGRAM_BOT_TOKEN);
-  } catch (err) {
-    res.status(401).json({ error: err instanceof Error ? err.message : 'Invalid initData' }); return null;
-  }
-  const telegramId = String(parsed.user.id);
-  const dbUser = await prisma.user.findUnique({ where: { telegramId }, select: { id: true } }).catch(() => null);
-  if (!dbUser) { res.status(401).json({ error: 'User not found. Please re-open the app.' }); return null; }
-  return { id: dbUser.id, telegramId };
+async function resolveUser(initData: unknown, res: Response) {
+  if (typeof initData !== 'string') { res.status(401).json({ error: 'Откройте приложение в Telegram.' }); return null; }
+  let telegramId: string;
+  try { telegramId = String(validateAndParseTelegramInitData(initData, env.TELEGRAM_BOT_TOKEN).user.id); }
+  catch { res.status(401).json({ error: 'Сессия истекла. Откройте приложение заново.' }); return null; }
+  const user = await prisma.user.findUnique({ where: { telegramId }, select: { id: true } });
+  if (!user) res.status(401).json({ error: 'User not found' });
+  return user;
 }
-
-// ─── POST /api/payments/subscription ──────────────────────────────────────────
-// Returns the caller's current subscription (with lazy tier-expiry + monthly
-// reset applied). Used to refresh the UI after a payment completes.
-
-router.post('/subscription', async (req: Request, res: Response): Promise<void> => {
-  const { initData } = req.body as { initData?: unknown };
-  const dbUser = await resolveUser(initData, res);
-  if (!dbUser) return;
-  const sub = await getEffectiveSubscription(dbUser.id);
-  res.json({ subscription: serializeSub(sub) });
+router.post('/subscription', async (req, res) => {
+  const user = await resolveUser(req.body?.initData, res); if (!user) return;
+  res.json({ subscription: serializeSub(await getEffectiveSubscription(user.id)) });
 });
-
-// Body: { initData, tier }  Response: { invoiceUrl }
-
-router.post('/stars/create-invoice', async (req: Request, res: Response): Promise<void> => {
-  const { initData, tier } = req.body as { initData?: unknown; tier?: unknown };
-  const dbUser = await resolveUser(initData, res);
-  if (!dbUser) return;
-  if (!isPaidTier(tier)) { res.status(400).json({ error: 'Invalid plan tier' }); return; }
-  const price = pricingFor(tier);
-  const payload = JSON.stringify({ t: 'sub', tier, uid: dbUser.id });
-  if (Buffer.byteLength(payload, 'utf8') > 128) { res.status(400).json({ error: 'payload too large' }); return; }
-
-  try {
-    const invoiceUrl = await createStarsInvoiceLink({
-      title:       PLAN_TITLE[tier],
-      description: 'Subscription ' + TIER_DISPLAY[tier] + ' for 30 days',
-      payload,
-      amountStars: price.stars,
-      token:       env.TELEGRAM_BOT_TOKEN,
-    });
-    res.json({ invoiceUrl });
-  } catch (err) {
-    console.error('[payments/stars] invoice failed:', (err as Error).message);
-    res.status(502).json({ error: 'Не удалось создать счёт. Попробуйте снова.' });
-  }
+// Old clients cannot create invoices or use the user-id-only TON matching flow.
+router.post(['/stars/create-invoice', '/stars/create-style-invoice', '/ton/verify', '/ton/verify-style'], (_req, res) => {
+  res.status(410).json({ error: 'Обновите приложение. Оплата доступна только через TON.' });
 });
-
-// ─── POST /api/payments/ton/verify ────────────────────────────────────────────
-// Verifies a TON payment sent via TonConnect and grants the plan on success.
-// Body: { initData, tier, senderWallet }  Response: { subscription } | error
-
-router.post('/ton/verify', async (req: Request, res: Response): Promise<void> => {
-  const { initData, tier, senderWallet } = req.body as { initData?: unknown; tier?: unknown; senderWallet?: unknown };
-  const dbUser = await resolveUser(initData, res);
-  if (!dbUser) return;
-  if (!isPaidTier(tier)) { res.status(400).json({ error: 'Invalid plan tier' }); return; }
-  if (typeof senderWallet !== 'string' || !senderWallet.trim()) { res.status(400).json({ error: 'senderWallet is required' }); return; }
-  if (!env.TON_RECEIVING_WALLET || !env.TONCENTER_API_KEY) {
-    res.status(503).json({ error: 'TON payments are not configured.' }); return;
-  }
-  const expectedTon = pricingFor(tier as PaidTier).ton;
-
-  const result = await verifyTonDeposit({
-    expectedTon,
-    senderWallet: senderWallet.trim(),
-    receivingWallet: env.TON_RECEIVING_WALLET,
-    apiKey: env.TONCENTER_API_KEY,
-    // Binds the deposit to this user — the transfer must carry their Telegram id
-    // as a comment, so a stranger's wallet/tx cannot be claimed here.
-    expectedComment: dbUser.telegramId,
-    isHashUsed: async (hash) => !!(await prisma.tonPayment.findUnique({ where: { txHash: hash }, select: { id: true } }).catch(() => null)),
+router.post('/ton/orders', async (req, res) => {
+  const user = await resolveUser(req.body?.initData, res); if (!user) return;
+  if (!env.TON_RECEIVING_WALLET || !env.TONCENTER_API_KEY) { res.status(503).json({ error: 'TON payments are not configured' }); return; }
+  const { kind, productId } = req.body;
+  let amountTon: number;
+  if (kind === 'subscription' && isPaidTier(productId)) amountTon = pricingFor(productId).ton;
+  else if (kind === 'style' && typeof productId === 'string') {
+    const style = await prisma.style.findUnique({ where: { id: productId } });
+    if (!style?.published || style.showcaseOnly || style.priceKind !== 'PAID' || !style.priceGram || style.priceGram <= 0) { res.status(400).json({ error: 'Стиль недоступен для покупки.' }); return; }
+    if (await prisma.stylePurchase.findUnique({ where: { userId_styleId: { userId: user.id, styleId: productId } } })) { res.status(409).json({ error: 'Стиль уже приобретён.' }); return; }
+    amountTon = style.priceGram;
+  } else { res.status(400).json({ error: 'Invalid product' }); return; }
+  const order = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+    const pending = await tx.paymentOrder.findFirst({ where: { userId: user.id, kind, productId, paidAt: null, expiresAt: { gt: new Date() } }, orderBy: { createdAt: 'desc' } });
+    return pending ?? tx.paymentOrder.create({ data: { userId: user.id, kind, productId, amountTon, receivingWallet: env.TON_RECEIVING_WALLET, expiresAt: new Date(Date.now() + 30 * 60_000) } });
   });
-
+  res.json({ orderId: order.id, address: order.receivingWallet, amountNano: BigInt(Math.round(order.amountTon * 1e9)).toString(), comment: `publium:${order.id}`, expiresAt: order.expiresAt.toISOString() });
+});
+router.post('/ton/orders/:id/verify', async (req, res) => {
+  const user = await resolveUser(req.body?.initData, res); if (!user) return;
+  const order = await prisma.paymentOrder.findFirst({ where: { id: req.params.id, userId: user.id } });
+  if (!order) { res.status(404).json({ error: 'Заказ не найден.' }); return; }
+  const resultBody = async () => order.kind === 'subscription' ? { subscription: serializeSub(await getEffectiveSubscription(user.id)) } : { owned: true, styleId: order.productId };
+  if (order.paidAt) { res.json(await resultBody()); return; }
+  const senderWallet = req.body.senderWallet;
+  if (typeof senderWallet !== 'string' || !senderWallet.trim()) { res.status(400).json({ error: 'Кошелёк не указан.' }); return; }
+  const result = await verifyTonDeposit({ expectedTon: order.amountTon, senderWallet, receivingWallet: order.receivingWallet, apiKey: env.TONCENTER_API_KEY, expectedComment: `publium:${order.id}`, fromDate: order.createdAt, untilDate: order.expiresAt, isHashUsed: async txHash => Boolean(await prisma.paymentLedger.findUnique({ where: { txHash } })) });
   if (!result.ok || !result.txHash) {
-    res.status(402).json({ error: result.hint ?? 'Платёж не найден. Попробуйте ещё раз через минуту.', code: result.error });
-    return;
-  }
-
+    if (result.error === 'transaction_not_found' && Date.now() > order.expiresAt.getTime() + 10 * 60_000) { res.status(410).json({ error: 'Срок заказа истёк, перевод не найден. Если деньги отправлены, сохраните идентификатор заказа и обратитесь в поддержку: ' + order.id, code: 'ORDER_EXPIRED' }); return; }
+    res.status(402).json({ error: 'Платёж пока не найден. Повторите проверку без нового перевода.', code: result.error }); return; }
   try {
-    const granted = await prisma.$transaction(async (tx) => {
-      await tx.tonPayment.create({
-        data: { txHash: result.txHash!, userId: dbUser.id, tier: tier as PaidTier, amountTon: result.actualTon ?? expectedTon },
-      });
-      return grantSubscription(dbUser.id, tier as PaidTier, undefined, tx);
+    await prisma.$transaction(async tx => {
+      const claimed = await tx.paymentOrder.updateMany({ where: { id: order.id, paidAt: null }, data: { paidAt: new Date() } });
+      if (!claimed.count) return;
+      await tx.paymentLedger.create({ data: { txHash: result.txHash!, orderId: order.id, userId: user.id, kind: order.kind } });
+      if (order.kind === 'subscription' && isPaidTier(order.productId)) {
+        await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+        await grantSubscription(user.id, order.productId, undefined, tx);
+      } else if (order.kind === 'style') {
+        await tx.stylePurchase.upsert({ where: { userId_styleId: { userId: user.id, styleId: order.productId } }, create: { userId: user.id, styleId: order.productId, via: 'TON', txHash: result.txHash }, update: {} });
+      } else throw new Error('Invalid stored product');
     });
-    res.json({ subscription: serializeSub(granted) });
   } catch (error) {
-    if ((error as { code?: string })?.code === 'P2002') {
-      res.status(409).json({ error: 'Этот платёж уже зачтён.' });
-      return;
-    }
-    console.error('[payments/ton] grant failed:', (error as Error).message);
-    res.status(500).json({ error: 'Не удалось активировать тариф. Платёж можно проверить повторно.' });
+    if ((error as { code?: string }).code === 'P2002') { res.status(409).json({ error: 'Этот перевод уже использован.' }); return; }
+    throw error;
   }
+  res.json(await resultBody());
 });
-
-// ─── POST /api/payments/stars/create-style-invoice ────────────────────────────
-// Creates a Telegram Stars invoice for a one-time style purchase. The grant
-// happens in the bot's successful_payment handler (authoritative).
-// Body: { initData, styleId }  Response: { invoiceUrl }
-
-router.post('/stars/create-style-invoice', async (req: Request, res: Response): Promise<void> => {
-  const { initData, styleId } = req.body as { initData?: unknown; styleId?: unknown };
-  const dbUser = await resolveUser(initData, res);
-  if (!dbUser) return;
-  if (typeof styleId !== 'string' || !styleId.trim()) { res.status(400).json({ error: 'styleId is required' }); return; }
-
-  const style = await prisma.style.findUnique({
-    where:  { id: styleId },
-    select: { id: true, nameEn: true, priceKind: true, priceStars: true, published: true },
-  }).catch(() => null);
-  if (!style || !style.published) { res.status(404).json({ error: 'Style not found' }); return; }
-  if (style.priceKind !== 'PAID' || !style.priceStars || style.priceStars < 1) {
-    res.status(400).json({ error: 'This style is not purchasable with Stars' }); return;
-  }
-
-  // Payload echoed back in successful_payment — identifies user + style.
-  const payload = JSON.stringify({ t: 'style', sid: style.id, uid: dbUser.id });
-  if (Buffer.byteLength(payload, 'utf8') > 128) { res.status(400).json({ error: 'payload too large' }); return; }
-
-  try {
-    const invoiceUrl = await createStarsInvoiceLink({
-      title:       `Publium · ${style.nameEn}`,
-      description: `Стиль обложек «${style.nameEn}» — разовая покупка`,
-      payload,
-      amountStars: style.priceStars,
-      token:       env.TELEGRAM_BOT_TOKEN,
-    });
-    res.json({ invoiceUrl });
-  } catch (err) {
-    console.error('[payments/stars/style] invoice failed:', (err as Error).message);
-    res.status(502).json({ error: 'Не удалось создать счёт. Попробуйте снова.' });
-  }
-});
-
-// ─── POST /api/payments/ton/verify-style ──────────────────────────────────────
-// Verifies a TON (Gram) payment for a one-time style purchase and records
-// ownership on success.
-// Body: { initData, styleId, senderWallet }  Response: { owned: true, styleId } | error
-
-router.post('/ton/verify-style', async (req: Request, res: Response): Promise<void> => {
-  const { initData, styleId, senderWallet } = req.body as { initData?: unknown; styleId?: unknown; senderWallet?: unknown };
-  const dbUser = await resolveUser(initData, res);
-  if (!dbUser) return;
-  if (typeof styleId !== 'string' || !styleId.trim()) { res.status(400).json({ error: 'styleId is required' }); return; }
-  if (typeof senderWallet !== 'string' || !senderWallet.trim()) { res.status(400).json({ error: 'senderWallet is required' }); return; }
-  if (!env.TON_RECEIVING_WALLET || !env.TONCENTER_API_KEY) {
-    res.status(503).json({ error: 'TON payments are not configured.' }); return;
-  }
-
-  const style = await prisma.style.findUnique({
-    where:  { id: styleId },
-    select: { id: true, priceKind: true, priceGram: true, published: true },
-  }).catch(() => null);
-  if (!style || !style.published) { res.status(404).json({ error: 'Style not found' }); return; }
-  if (style.priceKind !== 'PAID' || !style.priceGram || style.priceGram <= 0) {
-    res.status(400).json({ error: 'This style is not purchasable with Gram' }); return;
-  }
-
-  const result = await verifyTonDeposit({
-    expectedTon:     style.priceGram,
-    senderWallet:    senderWallet.trim(),
-    receivingWallet: env.TON_RECEIVING_WALLET,
-    apiKey:          env.TONCENTER_API_KEY,
-    expectedComment: dbUser.telegramId,
-    isHashUsed: async (hash) => !!(await prisma.stylePurchase.findUnique({ where: { txHash: hash }, select: { id: true } }).catch(() => null)),
-  });
-
-  if (!result.ok || !result.txHash) {
-    res.status(402).json({ error: result.hint ?? 'Платёж не найден. Попробуйте ещё раз через минуту.', code: result.error });
-    return;
-  }
-
-  // The unique txHash + (userId, styleId) constraints are the final guard against
-  // a double-claim race between two verify calls.
-  const { alreadyOwned } = await grantStylePurchase(dbUser.id, style.id, 'GRAM', result.txHash);
-  if (alreadyOwned) { res.status(409).json({ error: 'Этот платёж уже зачтён.' }); return; }
-  res.json({ owned: true, styleId: style.id });
-});
-
 export default router;
