@@ -15,6 +15,7 @@ export async function tonCheckout(wallet: TonConnectUI, kind: 'subscription' | '
   const uid = getTelegramUserId();
   if (!uid) throw new Error('Откройте приложение в Telegram.');
   if (!wallet.account) { await wallet.openModal(); throw new Error('Подключите кошелёк и повторите действие.'); }
+  if (wallet.account.chain !== '-239') throw new Error('Для оплаты подключите кошелёк в основной сети TON.');
   const key = `publium-payment:${uid}:${kind}:${productId}`;
   let pending: { orderId: string; senderWallet: string } | null;
   try { pending = JSON.parse(localStorage.getItem(key) ?? 'null'); }

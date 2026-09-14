@@ -38,12 +38,13 @@ export function addressesMatch(a: string, b: string): boolean {
 
 interface TonInMsg {
   source?: string;
+  bounced?: boolean;
   value?: string;
   comment?: string;
   decoded_body?: { comment?: string };
   message_content?: { decoded?: { type?: string; comment?: string } };
 }
-interface TonTx { now?: number; hash?: string; in_msg?: TonInMsg; }
+interface TonTx { now?: number; hash?: string; in_msg?: TonInMsg; emulated?: boolean; description?: { aborted?: boolean }; }
 
 /** Reads the text comment attached to an incoming message, across TonCenter shapes. */
 function extractComment(inMsg: TonInMsg): string | null {
@@ -110,9 +111,10 @@ export async function verifyTonDeposit(opts: {
       const txs = Array.isArray(data.transactions) ? data.transactions : [];
 
       for (const tx of txs) {
+        if (tx.emulated || tx.description?.aborted !== false) continue;
         if ((tx.now || 0) < since || (tx.now || 0) > until) continue;
         const inMsg = tx.in_msg;
-        if (!inMsg) continue;
+        if (!inMsg || inMsg.bounced) continue;
         if (!addressesMatch(inMsg.source ?? '', senderWallet)) continue;
         if (BigInt(inMsg.value || '0') < expectedNano) continue;
         // Bind the deposit to the paying user: the transfer must carry their
