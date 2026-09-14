@@ -30,5 +30,7 @@ jobs:
       - run: npm run build --prefix server
       - run: npm test --prefix server
       - run: node server/scripts/security-smoke.mjs
-      - run: cd server && npx prisma migrate deploy && node scripts/audit-integration.mjs
+      - run: cd server && npx prisma migrate deploy && npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code && node scripts/audit-integration.mjs
       - run: npm run test:frontend
+        env:
+          NODE_ENV: production
