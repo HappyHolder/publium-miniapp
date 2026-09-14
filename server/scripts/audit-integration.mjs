@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,10 +19,10 @@ const { assertMediaAccess } = require('../dist/lib/mediaAccess.js');
 const { Prisma } = require('@prisma/client');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'publium-audit-'));
 env.STORAGE_DIR = temp;
-const tag = randomUUID(); let user, stranger, style;
+const tag = randomUUID(); let user, stranger, style, httpServer;
 const originalFetch = globalThis.fetch;
 try {
-  user = await prisma.user.create({ data: { telegramId: `audit-${tag}`, subscription: { create: { tier: 'STARTER', expiresAt: new Date(Date.now() + 86400000), quotaResetAt: new Date(Date.now() + 86400000) } } } });
+  user = await prisma.user.create({ data: { telegramId: String(Date.now()), subscription: { create: { tier: 'STARTER', expiresAt: new Date(Date.now() + 86400000), quotaResetAt: new Date(Date.now() + 86400000) } } } });
   stranger = await prisma.user.create({ data: { telegramId: `other-${tag}` } });
   const channel = await prisma.channel.create({ data: { userId: user.id, name: 'Integration test', tgChatId: '-100000000001' } });
   const plan = await prisma.contentPlan.create({ data: { channelId: channel.id, topic: 'Test', postsPerDay: 1, days: 1, startDate: new Date(), items: { create: [{ orderIndex: 0, scheduledAt: new Date(), workingTitle: 'Test', angle: '', searchQuery: 'Test' }] } } });
@@ -76,12 +76,46 @@ try {
   await prisma.paymentLedger.create({ data: { txHash: hash, userId: user.id, kind: 'subscription' } });
   await assert.rejects(prisma.paymentLedger.create({ data: { txHash: hash, userId: user.id, kind: 'style' } }));
   console.log('PASS cross-product TON replay constraint');
+
+  // Exercise the real authenticated HTTP checkout and transaction boundary.
+  globalThis.fetch = originalFetch;
+  env.TON_RECEIVING_WALLET = '0:' + 'a'.repeat(64); env.TONCENTER_API_KEY = 'test';
+  const verification = require('../dist/lib/tonVerification.js');
+  let verifiedHash = 'b'.repeat(64);
+  verification.verifyTonDeposit = async () => ({ ok: true, txHash: verifiedHash });
+  const express = require('express'); const app = express();
+  app.use(express.json()); app.use('/payments', require('../dist/routes/payments.js').default);
+  app.use((error, _req, res, _next) => res.status(error.status ?? 500).json({ error: error.message }));
+  httpServer = await new Promise(resolve => { const server = app.listen(0, '127.0.0.1', () => resolve(server)); });
+  const params = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: Number(user.telegramId), first_name: 'Audit' }) });
+  const secret = createHmac('sha256', 'WebAppData').update(env.TELEGRAM_BOT_TOKEN).digest();
+  params.set('hash', createHmac('sha256', secret).update([...params].map(([k, v]) => `${k}=${v}`).sort().join('\n')).digest('hex'));
+  const request = (route, body = {}) => fetch(`http://127.0.0.1:${httpServer.address().port}/payments${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: params.toString(), ...body }) });
+  assert.equal((await request('/stars/create-invoice')).status, 410);
+  const orderResponse = await request('/ton/orders', { kind: 'subscription', productId: 'CREATOR', amountTon: 0.001 });
+  assert.equal(orderResponse.status, 200); const order = await orderResponse.json();
+  assert.equal(order.amountNano, '40000000000');
+  const [first, second] = await Promise.all([request(`/ton/orders/${order.orderId}/verify`, { senderWallet: 'test' }), request(`/ton/orders/${order.orderId}/verify`, { senderWallet: 'test' })]);
+  assert.equal(first.status, 200); assert.equal(second.status, 200);
+  assert.equal(await prisma.paymentLedger.count({ where: { orderId: order.orderId } }), 1);
+  assert.equal((await prisma.subscription.findUnique({ where: { userId: user.id } })).tier, 'CREATOR');
+  await prisma.stylePurchase.deleteMany({ where: { userId: user.id, styleId: style.id } });
+  await prisma.style.update({ where: { id: style.id }, data: { showcaseOnly: false } });
+  const styleOrder = await (await request('/ton/orders', { kind: 'style', productId: style.id })).json();
+  assert.equal((await request(`/ton/orders/${styleOrder.orderId}/verify`, { senderWallet: 'test' })).status, 409);
+  assert.equal((await prisma.paymentOrder.findUnique({ where: { id: styleOrder.orderId } })).paidAt, null);
+  verifiedHash = 'c'.repeat(64);
+  assert.equal((await request(`/ton/orders/${styleOrder.orderId}/verify`, { senderWallet: 'test' })).status, 200);
+  assert.equal(await prisma.stylePurchase.count({ where: { userId: user.id, styleId: style.id } }), 1);
+  console.log('PASS authenticated TON orders, server pricing, concurrent grant, replay rollback, style purchase and disabled Stars');
 } finally {
   globalThis.fetch = originalFetch;
+  if (httpServer) await new Promise(resolve => httpServer.close(resolve));
   if (style) await prisma.style.delete({ where: { id: style.id } });
   if (user) {
     await prisma.publicationRecord.deleteMany({ where: { userId: user.id } });
     await prisma.paymentLedger.deleteMany({ where: { userId: user.id } });
+    await prisma.paymentOrder.deleteMany({ where: { userId: user.id } });
     await prisma.storedAsset.deleteMany({ where: { ownerUserId: user.id } });
     await prisma.user.delete({ where: { id: user.id } });
   }

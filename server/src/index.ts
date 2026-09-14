@@ -61,7 +61,11 @@ app.use('/api/moderator-config', moderatorApiLimit);
 // and a safe fallback. The directory is created on boot so static serving works
 // before the first upload.
 fs.mkdirSync(env.STORAGE_DIR, { recursive: true });
-app.use('/uploads', (req, res, next) => { if (/\.(html?|xhtml)$/i.test(req.path)) { res.sendStatus(404); return; } next(); });
+app.use('/uploads', (req, res, next) => {
+  try { if (/\.(html?|xhtml)$/i.test(decodeURIComponent(req.path))) { res.sendStatus(404); return; } }
+  catch { res.sendStatus(400); return; }
+  next();
+});
 app.use('/uploads', express.static(env.STORAGE_DIR, {
   maxAge: '30d',
   immutable: true,

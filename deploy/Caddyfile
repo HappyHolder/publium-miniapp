@@ -21,12 +21,10 @@
 
 	# Templates are read from storage by the renderer, never distributed as public assets.
 	@templates path_regexp templates (?i)^/uploads/.*\.(html?|xhtml)$
-	handle @templates {
-		respond "Not found" 404
-	}
 
 	# Uploaded & generated files (covers, logos, templates).
 	handle /uploads/* {
+		respond @templates "Not found" 404
 		root * /srv
 		# Active formats are downloads/plain text and cannot execute in the app origin.
 		@active path *.html *.htm *.xhtml *.svg
