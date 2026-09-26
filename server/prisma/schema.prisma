@@ -1030,6 +1030,122 @@ model CommunityManager {
   episodes             CommunityManagerEpisode[]
   agentSessions        CommunityManagerAgentSession[]
   agentEvents          CommunityManagerAgentEvent[]
+  collaberProfiles     CollaberProfile[]
+  collaberImports      CollaberImport[]
+  collaberTasks        CollaberTask[]
+  collaberRequests     CollaberRequest[]
+  collaberSessions     CollaberSession[]
+  collaberInvites      CollaberInvite[]
+}
+
+model CollaberProfile {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  participantId      String @unique
+  tgUserId           String
+  searchable         Boolean @default(true)
+  publicMentions     Boolean @default(false)
+  forgotten          Boolean @default(false)
+  facts              Json @default("[]")
+  sourceText         String @default("")
+  sourceMessageId    Int?
+  sourceAt           DateTime?
+  reviewedAt         DateTime?
+  lastProposedAt     DateTime?
+  membership         String @default("UNKNOWN")
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  participant        CommunityManagerParticipant @relation(fields:[participantId], references:[id], onDelete:Cascade)
+  @@unique([communityManagerId, tgUserId])
+  @@index([communityManagerId, searchable, sourceAt])
+}
+
+model CollaberImport {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  checksum           String
+  filename           String
+  status             String @default("PREVIEW")
+  messages           Json @default("[]")
+  total              Int
+  skipped            Int @default(0)
+  processed          Int @default(0)
+  profiles           Int @default(0)
+  attempts           Int @default(0)
+  error              String?
+  leaseUntil         DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  @@unique([communityManagerId, checksum])
+  @@index([status, createdAt])
+}
+
+model CollaberTask {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  dedupeKey          String @unique
+  kind               String
+  payload            Json
+  status             String @default("PENDING")
+  attempts           Int @default(0)
+  runAfter           DateTime @default(now())
+  leaseUntil         DateTime?
+  error              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  @@index([status, runAfter])
+}
+
+model CollaberRequest {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  dedupeKey          String @unique
+  tgUserId           String
+  chatId             String
+  sourceMessageId    Int?
+  query              String
+  candidates         Json @default("[]")
+  status             String @default("READY")
+  initiative         Boolean @default(false)
+  response           String?
+  telegramMessageId  Int?
+  feedback           String?
+  error              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  @@index([communityManagerId, createdAt])
+}
+
+model CollaberSession {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  tgUserId           String
+  botId              String
+  state              String @default("SEARCH")
+  query              String @default("")
+  expiresAt          DateTime
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  @@unique([botId, tgUserId])
+}
+
+model CollaberInvite {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  pairKey            String
+  requesterId        String
+  candidateId        String
+  requestId          String
+  status             String @default("WAITING")
+  expiresAt          DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  @@unique([communityManagerId, pairKey])
+  @@index([communityManagerId, status])
 }
 
 model CommunityManagerParticipant {
@@ -1060,6 +1176,7 @@ model CommunityManagerParticipant {
   communityManager     CommunityManager                   @relation(fields: [communityManagerId], references: [id], onDelete: Cascade)
   claims               CommunityManagerParticipantClaim[]
   episodes             CommunityManagerEpisode[]
+  collaberProfile      CollaberProfile?
 
   @@unique([communityManagerId, tgUserId])
   @@index([communityManagerId, relationship, lastSeenAt])

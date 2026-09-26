@@ -8,7 +8,7 @@ const secret=process.env.COMMUNITY_MANAGER_WEBHOOK_SECRET;
 const username=(process.env.COMMUNITY_MANAGER_BOT_USERNAME||'').replace(/^@/,'');
 const url=process.env.COMMUNITY_MANAGER_WEBHOOK_URL||'https://publium.ru/api/community-manager/webhook';
 if(!token||!secret||!username)throw new Error('Community Manager bot env is incomplete');
-const response=await fetch('https://api.telegram.org/bot'+token+'/setWebhook',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,secret_token:secret,allowed_updates:['message','edited_message','my_chat_member']})});
+const response=await fetch('https://api.telegram.org/bot'+token+'/setWebhook',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,secret_token:secret,allowed_updates:['message','edited_message','callback_query','my_chat_member']})});
 const body=await response.json();if(!body.ok)throw new Error(body.description||'setWebhook failed');
 const identity=await (await fetch('https://api.telegram.org/bot'+token+'/getMe')).json();
 if(!identity.ok||String(identity.result?.username||'').toLowerCase()!==username.toLowerCase())throw new Error('Bot username does not match env');

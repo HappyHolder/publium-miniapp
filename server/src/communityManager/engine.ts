@@ -1,4 +1,9 @@
 import { hydrateLinkedChannel } from './channelContext';
+import { acceptCollaberUpdate } from './collaber/telegram';
+import { queueLiveIntro } from './collaber/service';
+import { preferenceCommand } from './collaber/domain';
+import { processCollaberJobs } from './collaber/worker';
+import { deliverMatch } from './collaber/delivery';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -26,7 +31,7 @@ import { runCommunityManagerAgent } from './agentRuntime';
 import { conversationSessionKey } from './agentSession';
 
 type TgAuthor={id:number;is_bot?:boolean;username?:string;first_name?:string;last_name?:string};
-type TgMessage={message_id:number;date?:number;chat:{id:number};message_thread_id?:number;is_automatic_forward?:boolean;sender_chat?:{id:number};forward_from_message_id?:number;forward_origin?:{type?:string;chat?:{id:number};message_id?:number};from?:TgAuthor;text?:string;caption?:string;reply_to_message?:{message_id:number;date?:number;from?:TgAuthor;text?:string;caption?:string}};
+type TgMessage={message_id:number;date?:number;edit_date?:number;chat:{id:number};message_thread_id?:number;is_automatic_forward?:boolean;sender_chat?:{id:number};forward_from_message_id?:number;forward_origin?:{type?:string;chat?:{id:number};message_id?:number};from?:TgAuthor;text?:string;caption?:string;reply_to_message?:{message_id:number;date?:number;from?:TgAuthor;text?:string;caption?:string}};
 type TgUpdate={update_id:number;message?:TgMessage;edited_message?:TgMessage};
 type Ctx={manager:any;config:CommunityManagerConfigData;community:any};
 const contextOwnerId=(community:any):string|undefined=>community.chat?.userId??community.channel?.userId;
@@ -46,6 +51,7 @@ async function published(chatId:string,executorType?:'SHARED'|'CUSTOM',community
 
 export async function acceptCommunityManagerUpdate(update:TgUpdate,executor:{type:'SHARED'|'CUSTOM';botId:number;communityId?:string}={type:'SHARED',botId:getBotIdFromToken(env.COMMUNITY_MANAGER_BOT_TOKEN)}){
   if(!Number.isInteger(update.update_id))return'ignored';
+  if(await acceptCollaberUpdate(update,executor))return'collaber';
   const m=update.message??update.edited_message,text=(m?.text??m?.caption??'').trim();
   if(!m)return'ignored';
   const mirror=automaticChannelMirror(m);
@@ -80,10 +86,11 @@ export async function acceptCommunityManagerUpdate(update:TgUpdate,executor:{typ
       prisma.communityManagerMessage.updateMany({where:{communityManagerId:ctx.manager.id,telegramMessageId:m.message_id},data:{text:text.slice(0,12000),replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,messageType:m.text?'TEXT':'CAPTION'}}),
       prisma.communityManagerDigestMessage.upsert({where:{communityManagerId_telegramMessageId:{communityManagerId:ctx.manager.id,telegramMessageId:m.message_id}},create:{communityManagerId:ctx.manager.id,telegramMessageId:m.message_id,replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,messageType:m.text?'TEXT':'CAPTION',tgUserId:String(m.from.id),text:text.slice(0,12000),createdAt:digestCreatedAt,expiresAt:digestRetentionDate(digestCreatedAt)},update:{replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,messageType:m.text?'TEXT':'CAPTION',tgUserId:String(m.from.id),text:text.slice(0,12000),expiresAt:digestRetentionDate(digestCreatedAt)}}),
     ]);
+    if(ctx.config.features.collaber.enabled)await queueLiveIntro(ctx.manager.id,{...m,createdAt:new Date((m.edit_date??m.date??Math.floor(Date.now()/1000))*1000)},ctx.community.moderator?.enabled?new Date((m.edit_date??Math.floor(Date.now()/1000))*1000).toISOString():undefined);
     return'updated';
   }
   try{
-    const row=await prisma.communityManagerMessage.create({data:{communityManagerId:ctx.manager.id,telegramUpdateId:communityManagerUpdateKey(executor.botId,update.update_id),telegramMessageId:m.message_id,tgChatId:String(m.chat.id),tgUserId:String(m.from.id),replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,text:text.slice(0,12000),messageType:m.text?'TEXT':'CAPTION',moderationStatus:ctx.community.moderator?.enabled?'PENDING':'ALLOWED',expiresAt:new Date(Date.now()+86400_000)}});
+    const row=await prisma.communityManagerMessage.create({data:{communityManagerId:ctx.manager.id,telegramUpdateId:communityManagerUpdateKey(executor.botId,update.update_id),telegramMessageId:m.message_id,tgChatId:String(m.chat.id),tgUserId:String(m.from.id),replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,text:text.slice(0,12000),messageType:m.forward_origin?'FORWARDED':m.text?'TEXT':'CAPTION',moderationStatus:ctx.community.moderator?.enabled?'PENDING':'ALLOWED',expiresAt:new Date(Date.now()+86400_000)}});
     const digestCreatedAt=m.date?new Date(m.date*1000):row.createdAt;
     await prisma.communityManagerDigestMessage.upsert({where:{communityManagerId_telegramMessageId:{communityManagerId:ctx.manager.id,telegramMessageId:m.message_id}},create:{communityManagerId:ctx.manager.id,telegramMessageId:m.message_id,replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,messageType:m.text?'TEXT':'CAPTION',tgUserId:String(m.from.id),text:text.slice(0,12000),createdAt:digestCreatedAt,expiresAt:digestRetentionDate(digestCreatedAt)},update:{replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id,messageType:m.text?'TEXT':'CAPTION',tgUserId:String(m.from.id),text:text.slice(0,12000),createdAt:digestCreatedAt,expiresAt:digestRetentionDate(digestCreatedAt)}}).catch(()=>undefined);
     await rememberParticipant(ctx.manager.id,m.from,text,ctx.config.personality.relationshipStyle).catch(()=>undefined);
@@ -152,6 +159,7 @@ async function processJob(job:any){
     await done(job.id,'SKIPPED');return;
   }
   await prisma.communityManagerMessage.update({where:{id:m.id},data:{moderationStatus:'ALLOWED'}});
+  if(ctx.config.features.collaber.enabled&&(preferenceCommand(m.text??'')||(ctx.config.features.collaber.collectIntros&&ctx.config.replies.conversationMemory)))await queueLiveIntro(ctx.manager.id,m);
   const location=await resolveConversationLocation(ctx.manager.id,m),executor=await communityManagerExecutor(ctx.community.id);
   const burst=m.tgUserId?await prisma.communityManagerMessage.findMany({where:{communityManagerId:ctx.manager.id,tgUserId:m.tgUserId,replyToMessageId:m.replyToMessageId??null,createdAt:{gte:new Date(m.createdAt.getTime()-20000),lte:m.createdAt}},orderBy:{createdAt:'asc'},take:6,select:{text:true}}):[];
   const text=(burst.map((row:any)=>row.text).filter(Boolean).join('\n')||m.text||'').slice(0,12000),mention=mentionsTelegramUsername(text,executor.username);
@@ -169,6 +177,7 @@ async function processJob(job:any){
   await prisma.communityManagerConversationState.update({where:{communityManagerId:ctx.manager.id},data:{internalState:{personal} as any,lastAnalyzedAt:new Date(),messagesSinceAnalysis:0}});
   try{
     const result=await runCommunityManagerAgent({managerId:ctx.manager.id,communityId:ctx.community.id,channelId:ctx.community.channelId,channelName:contextName(ctx.community),chatId:m.tgChatId,config:ctx.config,sessionKey:conversationSessionKey(location.threadId,location.segmentId),threadId:location.threadId,segmentId:location.segmentId,event:{kind:'HUMAN_MESSAGE',dedupeKey:'human:'+ctx.manager.id+':'+m.id,sourceMessageId:m.id,currentText:text,currentTelegramMessageId:m.telegramMessageId,currentAuthorId:m.tgUserId??undefined,currentAuthor:participantLabel(participant),replyTarget:replyTarget??undefined,replyTargetMessageId:m.replyToMessageId??undefined,addressedToManager,addressedToOtherHuman}});
+    if(result.collaberRequestId){await deliverMatch(result.collaberRequestId,ctx.manager.id);await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'PROCESSED'}});await done(job.id,'COMPLETED');return}
     const decision=result.decision,humanQuestion=/[?？]\s*$/.test(text),unansweredQuestion=decision.action==='no_action'&&humanQuestion,nextLocation=await applyConversationAnalysis(ctx.manager.id,m.id,location,{topicKey:decision.topicKey||'conversation',sameSegment:decision.sameConversation,expectsReply:unansweredQuestion,conversationComplete:unansweredQuestion?false:decision.conversationComplete,newContribution:text,speechAct:humanQuestion?'question':'other',possibleClaims:decision.memoryUpdates.map(item=>({kind:item.kind,value:item.value,confidence:item.confidence}))},m.createdAt);
     await appendHumanThesis(nextLocation,participantLabel(participant),text);
     if(ctx.config.replies.conversationMemory&&decision.episode)await recordEpisode({managerId:ctx.manager.id,participantId:participant?.id,location:nextLocation,kind:decision.episode.kind,summary:decision.episode.summary,outcome:decision.episode.outcome});
@@ -206,7 +215,7 @@ export async function processCommunityManagerJobs(){
 export async function runCommunityActivity(managerId:string,type:CommunityActivityType,topic?:string,meta:{automatic?:boolean;reason?:string;postId?:string;phase?:string}={}){return runActivity(managerId,type,topic,meta)}
 
 let timer:NodeJS.Timeout|undefined;
-export function startCommunityManagerWorker(){if(timer)return;timer=setInterval(()=>{void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message));void Promise.all([prisma.communityManagerMessage.deleteMany({where:{expiresAt:{lt:new Date()}}}),prisma.communityManagerDigestMessage.deleteMany({where:{expiresAt:{lt:new Date()}}})]).catch(error=>console.error('[community-manager] cleanup failed',error.message))},5000);timer.unref();void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message))}
+export function startCommunityManagerWorker(){if(timer)return;timer=setInterval(()=>{void processCollaberJobs().catch(error=>console.error('[collaber] worker failed',error.message));void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message));void Promise.all([prisma.communityManagerMessage.deleteMany({where:{expiresAt:{lt:new Date()}}}),prisma.communityManagerDigestMessage.deleteMany({where:{expiresAt:{lt:new Date()}}})]).catch(error=>console.error('[community-manager] cleanup failed',error.message))},5000);timer.unref();void processCommunityManagerJobs().catch(error=>console.error('[community-manager] worker failed',error.message))}
 
 export async function simulateCommunityManager(managerId:string,text:string,raw?:unknown){
   const manager=await prisma.communityManager.findUnique({where:{id:managerId},include:{community:{include:{chat:true,channel:true,moderatorChat:true}}}});if(!manager?.community.moderatorChat)throw new Error('CM not found');await hydrateLinkedChannel(manager.community);

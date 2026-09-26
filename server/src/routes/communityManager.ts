@@ -1,4 +1,6 @@
 import { Router } from '../lib/asyncRouter';
+import { registerCollaberRoutes } from '../communityManager/collaber/routes';
+import { profilePreference } from '../communityManager/collaber/service';
 import { Request, Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -25,6 +27,8 @@ async function owned(req:Request,id:string){
   if(!manager)throw new Error('NOT_FOUND'); const subscription=await getEffectiveSubscription(a.user.id); if(!TIER_LIMITS[subscription.tier].canUseCommunityManager)throw new Error('PLAN_REQUIRED'); return{...a,manager,subscription};
 }
 const publicManager=(m:any)=>m?{id:m.id,status:m.status,enabled:m.enabled,mode:m.mode,draftVersion:m.draftVersion,publishedVersion:m.publishedVersion,lastActionAt:m.lastActionAt,lastHealthyAt:m.lastHealthyAt,lastError:m.lastError,executorType:m.executorType}:null;
+
+registerCollaberRoutes(router,owned,fail);
 
 router.get('/channels/:channelId',async(req,res)=>{
   let a;try{a=await auth(req)}catch(e){fail(res,e);return}
@@ -168,6 +172,8 @@ router.patch('/:id/participants/:participantId',async(req,res)=>{
 
 router.delete('/:id/participants/:participantId',async(req,res)=>{
   let c;try{c=await owned(req,req.params.id)}catch(e){fail(res,e);return}
+  const person=await prisma.communityManagerParticipant.findFirst({where:{id:req.params.participantId,communityManagerId:c.manager.id}});
+  if(person)await profilePreference(c.manager.id,person.tgUserId,'forget');
   const deleted=await prisma.communityManagerParticipant.deleteMany({where:{id:req.params.participantId,communityManagerId:c.manager.id}});
   if(!deleted.count){res.status(404).json({error:'Участник не найден'});return}
   res.json({ok:true});

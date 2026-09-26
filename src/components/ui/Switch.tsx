@@ -17,22 +17,22 @@ export function Switch({ label, description, value, onChange }: SwitchProps) {
         )}
       </div>
       <button
+        type="button"
         onClick={() => onChange(!value)}
+        aria-label={label}
         aria-checked={value}
         role="switch"
-        className={cn(
-          'relative inline-flex h-5 min-h-0 w-9 shrink-0 items-center rounded-full',
-          'transition-colors duration-200 ml-3',
-          value ? 'bg-[#FF6A00]' : 'bg-[#3A3A3F]'
-        )}
+        className="relative ml-3 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6A00]"
       >
+        <span className={cn('relative block h-5 w-9 rounded-full transition-colors duration-200 motion-reduce:transition-none',value ? 'bg-[#FF6A00]' : 'bg-[#3A3A3F]')}>
         <span
           className={cn(
             'absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm',
-            'transition-transform duration-200',
+            'transition-transform duration-200 motion-reduce:transition-none',
             value ? 'translate-x-4' : 'translate-x-0'
           )}
         />
+        </span>
       </button>
     </div>
   )

@@ -1,0 +1,137 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
+
+if(!new URL(process.env.DATABASE_URL??'').pathname.startsWith('/publium_audit_'))throw new Error('Collaber integration requires an isolated publium_audit_* database');
+const require=createRequire(import.meta.url);
+const {prisma}=require('../dist/db.js');
+const {env}=require('../dist/env.js');
+const ai=require('../dist/communityManager/collaber/inference.js');
+const telegram=require('../dist/lib/telegramBot.js');
+const {DEFAULT_CM_CONFIG}=require('../dist/communityManager/config.js');
+const {ingestIntro,findCandidates,createMatch,profilePreference}=require('../dist/communityManager/collaber/service.js');
+const {deliverMatch}=require('../dist/communityManager/collaber/delivery.js');
+const {processCollaberJobs}=require('../dist/communityManager/collaber/worker.js');
+const {processTelegramTask,acceptCollaberUpdate,entryPayload}=require('../dist/communityManager/collaber/telegram.js');
+const {issueModeratorSession}=require('../dist/lib/moderatorSession.js');
+const express=require('express');
+const originalFetch=globalThis.fetch;
+globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
+env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
+let sends=0,ambiguous=false;
+telegram.getChatMember=async(chat,user)=>({status:'member',user:{id:Number(user),first_name:'Участник '+user,username:'current_'+user}});
+telegram.sendRichMessage=telegram.sendBotMessage=async chat=>{sends++;if(ambiguous)throw new Error('Simulated connection loss');return {chatId:Number(chat),messageId:900+sends}};
+ai.collaberJson=async(managerId,stage,{prompt,system})=>{
+ const p=JSON.parse(prompt);
+ if(system.startsWith('Extract'))return {facts:[{kind:'offer',value:p.message,evidence:p.message}],closedNeedsEvidence:null};
+ if(system.startsWith('Given'))return{keywords:['маркетинг','продвижение']};
+ if(system.startsWith('Rank'))return{ids:p.candidates.slice(0,3).map(x=>x.id)};
+ throw new Error('Unexpected inference');
+};
+const tag=randomUUID();let user,community,other,moderatorChat,httpServer;
+try{
+ user=await prisma.user.create({data:{telegramId:String(Date.now()),subscription:{create:{tier:'STARTER',expiresAt:new Date(Date.now()+86400000),quotaResetAt:new Date(Date.now()+86400000)}}}});
+ const chat=await prisma.chat.create({data:{tgChatId:'-100'+Date.now(),title:'Collaber integration',userId:user.id}});
+ moderatorChat=await prisma.moderatorChat.create({data:{tgChatId:chat.tgChatId,title:chat.title,type:'supergroup',botStatus:'administrator'}});
+ community=await prisma.community.create({data:{chatId:chat.id,moderatorChatId:moderatorChat.id}});
+ other=await prisma.community.create({data:{}});
+ const config=structuredClone(DEFAULT_CM_CONFIG);config.features.collaber.enabled=true;config.features.collaber.initiatives='off';config.limits.quietEnabled=false;
+ const manager=await prisma.communityManager.create({data:{communityId:community.id,enabled:true,publishedVersion:1,draftVersion:1,configs:{create:{version:1,status:'PUBLISHED',config}}}});
+ const foreign=await prisma.communityManager.create({data:{communityId:other.id}});
+ const intro={id:'10',userId:'42',name:'Анна',username:'old_name',text:'Занимаюсь маркетингом и предлагаю продвижение приложений.',at:new Date().toISOString()};
+ assert.equal(await ingestIntro(manager.id,intro,config.features.collaber),true);
+ assert.equal(await ingestIntro(manager.id,intro,config.features.collaber),false);
+ assert.equal(await prisma.collaberProfile.count({where:{communityManagerId:manager.id}}),1);
+ assert.equal((await findCandidates(foreign.id,'маркетинг','43',config.features.collaber,false,false)).length,0);
+ assert.equal((await findCandidates(manager.id,'маркетинг','43',config.features.collaber,true,false)).length,0);
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id},data:{publicMentions:true}});
+ const found=await findCandidates(manager.id,'маркетинг','43',config.features.collaber,true,true);
+ assert.equal(found.length,1);assert.equal(found[0].username,'current_42');
+ console.log('PASS identity deduplication, community isolation, visibility, current Telegram username');
+
+ const historic={...intro,id:'9',userId:'55',at:'2024-06-01T00:00:00.000Z'};
+ assert.equal(await ingestIntro(manager.id,historic,config.features.collaber),true);
+ const historicResult=(await findCandidates(manager.id,'маркетинг','43',config.features.collaber,false,false)).find(c=>c.tgUserId==='55');
+ assert.ok(historicResult);assert.match(historicResult.reason,/Исторические сведения/);
+ await profilePreference(manager.id,'55','hide');
+ assert.ok(!(await findCandidates(manager.id,'маркетинг','43',config.features.collaber,false,false)).some(c=>c.tgUserId==='55'));
+ console.log('PASS all-time matching retains historical offers with explicit confirmation and respects opt-out');
+
+ const request=await createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'match-'+tag});
+ await Promise.all([deliverMatch(request.id,manager.id),deliverMatch(request.id,manager.id)]);
+ assert.equal(sends,1);assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).status,'SENT');
+ assert.equal((await prisma.subscription.findUnique({where:{userId:user.id}})).communityManagerActionsUsed,1);
+ console.log('PASS concurrent delivery is claimed once and charged once');
+
+ ambiguous=true;
+ const uncertain=await createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'uncertain-'+tag});
+ await assert.rejects(deliverMatch(uncertain.id,manager.id));assert.equal((await prisma.collaberRequest.findUnique({where:{id:uncertain.id}})).status,'UNCERTAIN');
+ await deliverMatch(uncertain.id,manager.id);assert.equal(sends,2);ambiguous=false;
+ console.log('PASS ambiguous dispatch is not retried');
+
+ const archive=await prisma.collaberImport.create({data:{communityManagerId:manager.id,checksum:tag,filename:'fixture.json',total:1,status:'PENDING',messages:[{...intro,id:'11',userId:'44'}]}});
+ await processCollaberJobs();
+ const imported=await prisma.collaberImport.findUnique({where:{id:archive.id}});
+ assert.equal(imported.status,'COMPLETED');assert.deepEqual(imported.messages,[]);assert.equal(imported.processed,1);assert.equal(sends,2);
+ console.log('PASS background import builds profiles, clears source archive and sends no messages');
+
+ const edited={...intro,text:'Занимаюсь дизайном и предлагаю оформление приложений.',at:new Date(Date.now()+1).toISOString()};
+ assert.equal(await ingestIntro(manager.id,edited,config.features.collaber),true);
+ const updated=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
+ assert.equal(updated.facts.length,1);assert.equal(updated.facts[0].evidence,edited.text);
+ console.log('PASS edited message replaces its obsolete facts');
+
+ const app=express();app.use(express.json());app.use('/cm',require('../dist/routes/communityManager.js').default);
+ httpServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});
+ const base='http://127.0.0.1:'+httpServer.address().port+'/cm/';
+ const headers={Authorization:'Bearer '+issueModeratorSession(user.telegramId).token};
+ assert.equal((await fetch(base+manager.id+'/collaber')).status,401);
+ assert.equal((await fetch(base+foreign.id+'/collaber',{headers})).status,404);
+ assert.equal((await fetch(base+manager.id+'/collaber',{headers})).status,200);
+ const upload=async()=>{const form=new FormData();form.append('file',new Blob([JSON.stringify({chatId:chat.tgChatId,messages:[{id:66,userId:'66',name:'Test',text:intro.text,at:intro.at}]})],{type:'application/json'}),'history.json');const r=await fetch(base+manager.id+'/collaber/imports',{method:'POST',headers,body:form});assert.equal(r.status,200);return r.json()};
+ const preview=await upload();assert.equal(preview.status,'PREVIEW');
+ await fetch(base+manager.id+'/collaber/imports/'+preview.id+'/cancel',{method:'POST',headers});
+ assert.equal((await upload()).status,'PREVIEW');
+ await fetch(base+manager.id+'/collaber/imports/'+preview.id+'/cancel',{method:'POST',headers});
+ assert.equal((await fetch(base+manager.id+'/collaber/profiles/foreign-profile',{method:'PATCH',headers:{...headers,'Content-Type':'application/json'},body:'{"forget":true}'})).status,400);
+ console.log('PASS HTTP authorization, foreign community/profile rejection, upload preview and cancelled re-upload');
+
+ const task=(uid,callback,text='')=>({id:'fixture-'+randomUUID(),communityManagerId:manager.id,payload:{userId:uid,botId:'100',text,name:'Участник '+uid,messageId:100,callback:callback?{data:callback,chatId:chat.tgChatId}:null}});
+ const beforeForeign=sends;
+ await processTelegramTask(task('99','cb:f:'+request.id+':0'));
+ assert.equal(sends,beforeForeign);assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).feedback,null);
+ await processTelegramTask(task('43',null,'/start '+entryPayload(manager.id)));
+ await processTelegramTask(task('42',null,'/start '+entryPayload(manager.id)));
+ await processTelegramTask(task('43','cb:n:'+request.id+':0'));
+ const invite=await prisma.collaberInvite.findFirst({where:{communityManagerId:manager.id,pairKey:'42:43'}});assert.equal(invite.status,'WAITING');
+ await processTelegramTask(task('99','cb:yes:'+invite.id+':0'));
+ assert.equal((await prisma.collaberInvite.findUnique({where:{id:invite.id}})).status,'WAITING');
+ await processTelegramTask(task('42','cb:yes:'+invite.id+':0'));
+ assert.equal((await prisma.collaberInvite.findUnique({where:{id:invite.id}})).status,'INTRODUCED');
+ const afterAccept=sends;await processTelegramTask(task('42','cb:yes:'+invite.id+':0'));assert.equal(sends,afterAccept);
+ const webhook={update_id:8675309,message:{message_id:99,chat:{type:'private',id:43},from:{id:43,first_name:'Tester'},text:'/start '+entryPayload(manager.id)}};
+ await acceptCollaberUpdate(webhook,{type:'SHARED',botId:100});await acceptCollaberUpdate(webhook,{type:'SHARED',botId:100});
+ assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,dedupeKey:'telegram:100:8675309'}}),1);
+ console.log('PASS callback ownership, two-party consent, repeated acceptance and webhook deduplication');
+
+ await profilePreference(manager.id,'42','forget');
+ const removed=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
+ assert.equal(removed.forgotten,true);assert.equal(removed.sourceText,'');assert.deepEqual(removed.facts,[]);
+ assert.equal(await ingestIntro(manager.id,{...intro,id:'12',at:new Date().toISOString()},config.features.collaber),false);
+ assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).status,'CANCELLED');
+ console.log('PASS erasure invalidates derived recommendations and prevents re-import resurrection');
+
+ await prisma.communityManager.update({where:{id:manager.id},data:{enabled:false}});
+ await assert.rejects(createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'paused-'+tag}),/выключен/);
+ const beforePrivacy=sends;telegram.getChatMember=async()=>({status:'left',user:{id:44}});
+ await processTelegramTask(task('44',null,'/forget'));
+ assert.equal((await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'44'}}})).forgotten,true);assert.equal(sends,beforePrivacy);
+ console.log('PASS manager pause blocks new matching');
+}finally{
+ if(httpServer)await new Promise(resolve=>httpServer.close(resolve));
+ if(community)await prisma.community.delete({where:{id:community.id}});
+ if(other)await prisma.community.delete({where:{id:other.id}});
+ if(moderatorChat)await prisma.moderatorChat.delete({where:{id:moderatorChat.id}});
+ if(user)await prisma.user.delete({where:{id:user.id}});
+ globalThis.fetch=originalFetch;await prisma.$disconnect();
+}

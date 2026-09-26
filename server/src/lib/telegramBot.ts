@@ -743,6 +743,7 @@ export async function sendRichMessage(
   html: string,
   token: string,
   replyMarkup?: AnyInlineKeyboard,
+  replyToMessageId?: number,
 ): Promise<SentMessageRef | null> {
   const url = `${TG_API}/bot${token}/sendRichMessage`;
   let res: Response;
@@ -753,6 +754,7 @@ export async function sendRichMessage(
       body: JSON.stringify({
         chat_id:      chatId,
         rich_message: { html },
+        ...(replyToMessageId ? { reply_parameters: { message_id: replyToMessageId, allow_sending_without_reply: true } } : {}),
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       }),
     });

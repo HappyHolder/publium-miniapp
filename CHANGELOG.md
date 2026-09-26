@@ -13,6 +13,13 @@ For the full always-current capability list, see [FEATURES.md](FEATURES.md).
 
 ## [Unreleased] — toward 1.5
 
+### Added
+- Collaber, an optional Community Manager function: Telegram JSON intro import, sourced participant profiles, partner search, consent-based introductions and draft/automatic suggestions.
+- CM → Functions → Collaber settings reuse the dark/orange interface, with configurable cover, introduction, contact/action buttons and live preview.
+- Scoped access, current membership checks, opt-out and erasure, durable import/jobs, usage journal and uncertain-delivery protection. See [implementation report](docs/collaber-release-2026-09-21.md).
+- Collaber regression and isolated PostgreSQL integration coverage in CI. The real Collaborations archive and pilot quality evaluation remain pending.
+
+
 ### Changed
 - Telegram auto-draft work is deferred to the next event-loop turn after the webhook acknowledgement, with rejected background tasks always logged.
 - Pulse deduplication now skips expected duplicate claims without emitting Prisma error logs.

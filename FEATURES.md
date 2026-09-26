@@ -1,6 +1,7 @@
 # Publium — Feature Inventory (current production)
 
 - **Community workspace** — Moderator, unified Community Manager, Community Core personas and Pulse analytics share one channel-level entry point.
+- **Collaber (optional CM function)** — Import Telegram Desktop JSON intros, search community partners, configure recommendation covers/buttons, request mutual introductions and prepare proactive drafts. Disabled by default; real pilot validation pending. `server/src/communityManager/collaber/`, `/api/community-manager/:id/collaber`.
 - **Moderator** — Welcome, CAPTCHA, anti-spam, content filters, triggers, sanctions, manual commands, journal and fail-open AI moderation.
 - **Managed executors** — Moderator and Community Manager can use shared bots or encrypted personal Telegram bots with their own webhook secrets.
 

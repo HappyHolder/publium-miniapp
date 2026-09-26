@@ -12,6 +12,7 @@ import { channelAboutContext, personalityPrompt } from './personality';
 import { normalizeCommunityManagerPunctuation } from './conversationStyle';
 import { openCommunityManagerSession } from './agentSession';
 import { relevantExpert } from './participantMemory';
+import { createMatch } from './collaber/service';
 
 export const COMMUNITY_AGENT_VERSION='community-agent-v1';
 
@@ -83,6 +84,7 @@ type AgentSnapshot={
 };
 
 type CommunityAgentContext={
+  collaberRequestId?:string;
   managerId:string;
   communityId:string;
   channelId:string|null;
@@ -153,6 +155,19 @@ async function loadSnapshot(managerId:string,config:CommunityManagerConfigData,e
     channelAbout:config.support.useBrandKit?channelAboutContext(manager?.community.chat?.style??manager?.community.channel?.brandKit):'',
   };
 }
+const collaberTool=tool({
+  name:'find_collaboration_partners',
+  description:'Find evidence-backed people for a professional collaboration when the current user asks the community manager. Ask for the task first if it is unclear. Never use for unrelated conversation.',
+  parameters:z.object({query:z.string().min(4).max(500)}),
+  execute:async({query},runContext)=>{
+    const ctx=(runContext as RunContext<CommunityAgentContext>).context;
+    if(!ctx.config.features.collaber.enabled||!ctx.config.features.collaber.onDemand||!ctx.event.currentAuthorId||!ctx.event.addressedToManager||ctx.event.addressedToOtherHuman)return 'Collaber unavailable for this event.';
+    const request=await createMatch({managerId:ctx.managerId,userId:ctx.event.currentAuthorId,chatId:ctx.chatId,query,dedupeKey:'agent-match:'+ctx.event.dedupeKey,sourceMessageId:ctx.event.currentTelegramMessageId});
+    ctx.collaberRequestId=request.id;
+    return json({candidates:request.candidates,instruction:'The application will render the recommendations with contact buttons. Do not invent additional candidates or facts.'});
+  },
+});
+
 const readThreadTool=tool({
   name:'read_current_thread',
   description:'Read the exact current Telegram thread. Use it before making factual claims about what people or the source post said.',
@@ -258,7 +273,7 @@ export async function runCommunityManagerAgent(input:{
     if(parsed.success){
       const stored=previous.references&&typeof previous.references==='object'&&!Array.isArray(previous.references)?previous.references as Record<string,unknown>:{};
       const sources=Array.isArray(stored.research)?stored.research as ResearchSource[]:[];
-      return{decision:parsed.data,sources,eventId:previous.id,inputTokens:previous.inputTokens,outputTokens:previous.outputTokens,totalTokens:previous.totalTokens,reused:true as const};
+      return{collaberRequestId:typeof stored.collaberRequestId==='string'?stored.collaberRequestId:undefined,decision:parsed.data,sources,eventId:previous.id,inputTokens:previous.inputTokens,outputTokens:previous.outputTokens,totalTokens:previous.totalTokens,reused:true as const};
     }
   }
   setDefaultOpenAIKey(env.OPENAI_API_KEY);
@@ -281,7 +296,7 @@ export async function runCommunityManagerAgent(input:{
     const existing=await prisma.communityManagerAgentEvent.findUnique({where:{dedupeKey:input.event.dedupeKey}});if(!existing)throw error;
     if(existing.status==='COMPLETED'&&existing.decision){
       const parsed=CommunityAgentDecisionSchema.safeParse(existing.decision),stored=existing.references&&typeof existing.references==='object'&&!Array.isArray(existing.references)?existing.references as Record<string,unknown>:{};
-      if(parsed.success)return{decision:parsed.data,sources:Array.isArray(stored.research)?stored.research as ResearchSource[]:[],eventId:existing.id,inputTokens:existing.inputTokens,outputTokens:existing.outputTokens,totalTokens:existing.totalTokens,reused:true as const};
+      if(parsed.success)return{collaberRequestId:typeof stored.collaberRequestId==='string'?stored.collaberRequestId:undefined,decision:parsed.data,sources:Array.isArray(stored.research)?stored.research as ResearchSource[]:[],eventId:existing.id,inputTokens:existing.inputTokens,outputTokens:existing.outputTokens,totalTokens:existing.totalTokens,reused:true as const};
     }
     if(existing.status==='RUNNING'&&existing.startedAt&&existing.startedAt>new Date(Date.now()-10*60_000))throw new Error('CM_AGENT_EVENT_IN_PROGRESS');
     const claimed=await prisma.communityManagerAgentEvent.updateMany({where:{id:existing.id,status:existing.status,updatedAt:existing.updatedAt},data:{sessionId:opened.row.id,status:'RUNNING',payload:input.event as unknown as Prisma.InputJsonValue,startedAt:new Date(),completedAt:null,error:null}});
@@ -289,12 +304,12 @@ export async function runCommunityManagerAgent(input:{
     event=await prisma.communityManagerAgentEvent.findUniqueOrThrow({where:{id:existing.id}});
   }
   try{
-    const agent=new Agent({name:'Community Manager',instructions,model:primaryTextModel(),modelSettings:{store:false,maxTokens:1800,reasoning:{effort:'low'},text:{verbosity:'low'}},tools:[readThreadTool,readRelatedBranchesTool,recallParticipantsTool,projectKnowledgeTool,webResearchTool],outputType:CommunityAgentDecisionSchema});
+    const agent=new Agent({name:'Community Manager',instructions,model:primaryTextModel(),modelSettings:{store:false,maxTokens:1800,reasoning:{effort:'low'},text:{verbosity:'low'}},tools:[...(input.config.features.collaber.enabled?[collaberTool]:[]),readThreadTool,readRelatedBranchesTool,recallParticipantsTool,projectKnowledgeTool,webResearchTool],outputType:CommunityAgentDecisionSchema});
     const result=await run(agent,eventInput(context),{context,maxTurns:5});
     if(!result.finalOutput)throw new Error('CM_AGENT_EMPTY');
     const decision=normalizeDecision(result.finalOutput,context),usage=result.state.usage;
-    await prisma.communityManagerAgentEvent.update({where:{id:event.id},data:{status:'COMPLETED',decision:decision as unknown as Prisma.InputJsonValue,references:{messages:decision.references,research:context.researchSources} as unknown as Prisma.InputJsonValue,model:primaryTextModel(),inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,totalTokens:usage.totalTokens,researchCalls:context.researchCalls,completedAt:new Date()}});
-    return{decision,sources:context.researchSources,eventId:event.id,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,totalTokens:usage.totalTokens};
+    await prisma.communityManagerAgentEvent.update({where:{id:event.id},data:{status:'COMPLETED',decision:decision as unknown as Prisma.InputJsonValue,references:{messages:decision.references,research:context.researchSources,collaberRequestId:context.collaberRequestId??null} as unknown as Prisma.InputJsonValue,model:primaryTextModel(),inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,totalTokens:usage.totalTokens,researchCalls:context.researchCalls,completedAt:new Date()}});
+    return{collaberRequestId:context.collaberRequestId,decision,sources:context.researchSources,eventId:event.id,inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,totalTokens:usage.totalTokens};
   }catch(error){
     await prisma.communityManagerAgentEvent.update({where:{id:event.id},data:{status:'FAILED',error:error instanceof Error?error.message.slice(0,500):'Agent failed',completedAt:new Date()}}).catch(()=>undefined);
     throw error;
