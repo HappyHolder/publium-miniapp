@@ -1,6 +1,7 @@
 import { Router } from '../lib/asyncRouter';
 import { registerCollaberRoutes } from '../communityManager/collaber/routes';
 import { profilePreference } from '../communityManager/collaber/service';
+import { membershipReaderToken } from '../communityManager/membership';
 import { Request, Response } from 'express';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -90,7 +91,8 @@ router.post('/:id/apply',async(req,res)=>{
   if(!draft){res.status(409).json({error:'Сначала сохраните настройки'});return}
   try{
     const executor=await communityManagerExecutor(c.manager.community.id);
-    const [bot,user]=await Promise.all([getChatMember(c.manager.community.moderatorChat.tgChatId,executor.botId,executor.token),getChatMember(c.manager.community.moderatorChat.tgChatId,Number(c.tgUserId),executor.token)]);
+    const readerToken=await membershipReaderToken(c.manager.community.id,c.manager.community.moderatorChat.tgChatId,executor.token);
+    const [bot,user]=await Promise.all([getChatMember(c.manager.community.moderatorChat.tgChatId,executor.botId,executor.token),getChatMember(c.manager.community.moderatorChat.tgChatId,Number(c.tgUserId),readerToken)]);
     const botAllowed=executor.type==='CUSTOM'?['administrator','creator'].includes(bot.status):['member','administrator','creator'].includes(bot.status);
     if(!botAllowed){res.status(409).json({error:executor.type==='CUSTOM'?'Добавьте персонального CM-бота администратором группы':'Добавьте @'+env.COMMUNITY_MANAGER_BOT_USERNAME+' в группу'});return}
     if(!['administrator','creator'].includes(user.status)){res.status(403).json({error:'Вы больше не администратор группы'});return}
@@ -231,7 +233,7 @@ router.post('/communities/:communityId/managed-bot/activate',async(req,res)=>{
 
 router.post('/communities/:communityId/executor/shared',async(req,res)=>{
   let a;try{a=await auth(req)}catch(e){fail(res,e);return}const community=await prisma.community.findFirst({where:{id:req.params.communityId,OR:[{chat:{userId:a.user.id}},{channel:{userId:a.user.id}}]},include:{moderatorChat:true,communityManager:true,managedCommunityManagerBot:true}});if(!community?.moderatorChat||!community.communityManager){res.status(404).json({error:'Community not found'});return}
-  try{const[botRole,userRole]=await Promise.all([getChatMember(community.moderatorChat.tgChatId,getBotIdFromToken(env.COMMUNITY_MANAGER_BOT_TOKEN),env.COMMUNITY_MANAGER_BOT_TOKEN),getChatMember(community.moderatorChat.tgChatId,Number(a.tgUserId),env.COMMUNITY_MANAGER_BOT_TOKEN)]);if(!['member','administrator','creator'].includes(botRole.status)||!['administrator','creator'].includes(userRole.status)){res.status(403).json({error:'Добавьте @'+env.COMMUNITY_MANAGER_BOT_USERNAME+' в группу'});return}await prisma.$transaction([prisma.communityManager.update({where:{id:community.communityManager.id},data:{executorType:'SHARED',mode:'AUTOPILOT'}}),...(community.managedCommunityManagerBot?[prisma.managedCommunityManagerBot.update({where:{id:community.managedCommunityManagerBot.id},data:{status:'READY'}})]:[])]);res.json({executorType:'SHARED'})}catch(e){res.status(502).json({error:e instanceof Error?e.message:'Не удалось проверить общего бота'})}
+  try{const readerToken=await membershipReaderToken(community.id,community.moderatorChat.tgChatId,env.COMMUNITY_MANAGER_BOT_TOKEN);const[botRole,userRole]=await Promise.all([getChatMember(community.moderatorChat.tgChatId,getBotIdFromToken(env.COMMUNITY_MANAGER_BOT_TOKEN),env.COMMUNITY_MANAGER_BOT_TOKEN),getChatMember(community.moderatorChat.tgChatId,Number(a.tgUserId),readerToken)]);if(!['member','administrator','creator'].includes(botRole.status)||!['administrator','creator'].includes(userRole.status)){res.status(403).json({error:'Добавьте @'+env.COMMUNITY_MANAGER_BOT_USERNAME+' в группу'});return}await prisma.$transaction([prisma.communityManager.update({where:{id:community.communityManager.id},data:{executorType:'SHARED',mode:'AUTOPILOT'}}),...(community.managedCommunityManagerBot?[prisma.managedCommunityManagerBot.update({where:{id:community.managedCommunityManagerBot.id},data:{status:'READY'}})]:[])]);res.json({executorType:'SHARED'})}catch(e){res.status(502).json({error:e instanceof Error?e.message:'Не удалось проверить общего бота'})}
 });
 
 router.post('/webhook/:botId',async(req,res)=>{

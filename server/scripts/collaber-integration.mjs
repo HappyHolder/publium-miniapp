@@ -19,7 +19,11 @@ const originalFetch=globalThis.fetch;
 globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
 env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
 let sends=0,ambiguous=false;
-telegram.getChatMember=async(chat,user)=>({status:'member',user:{id:Number(user),first_name:'Участник '+user,username:'current_'+user}});
+env.MODERATOR_BOT_TOKEN='200:moderator-test';
+telegram.getChatMember=async(chat,user,token)=>{
+ if(token==='100:test'&&Number(user)!==100)throw new Error('Non-admin CM must not verify other users');
+ return {status:Number(user)===200?'administrator':'member',user:{id:Number(user),first_name:'Участник '+user,username:'current_'+user}};
+};
 telegram.sendRichMessage=telegram.sendBotMessage=async chat=>{sends++;if(ambiguous)throw new Error('Simulated connection loss');return {chatId:Number(chat),messageId:900+sends}};
 ai.collaberJson=async(managerId,stage,{prompt,system})=>{
  const p=JSON.parse(prompt);

@@ -3,6 +3,7 @@ import { prisma } from '../../db';
 import { env } from '../../env';
 import { answerBotCallback, getChatMember } from '../../lib/telegramBot';
 import { communityManagerExecutor } from '../managedBot';
+import { membershipReaderToken } from '../membership';
 import { collaberContext, createMatch, enqueueCollaber, ingestIntro, profilePreference, type Candidate } from './service';
 import { deliverMatch, deliverMessage } from './delivery';
 import { canAct, contactUrl, preferenceCommand, safeUsername, type IntroMessage } from './domain';
@@ -38,7 +39,8 @@ export async function memberAccess(managerId:string,userId:string,allowInactive=
   const executor=await communityManagerExecutor(ctx.manager.communityId);
   // A former member must still be able to remove a previously saved profile.
   if(allowInactive)return{...ctx,executor};
-  const member=await getChatMember(ctx.chatId,Number(userId),executor.token);
+  const readerToken=await membershipReaderToken(ctx.manager.communityId,ctx.chatId,executor.token);
+  const member=await getChatMember(ctx.chatId,Number(userId),readerToken);
   if(!['member','creator','administrator'].includes(member.status)&&!(member.status==='restricted'&&(member as any).is_member))throw new Error('Доступ только для участников сообщества');
   if(String(member.user.id)!==userId)throw new Error('Не удалось подтвердить участника');
   await prisma.communityManagerParticipant.updateMany({where:{communityManagerId:managerId,tgUserId:userId},data:{username:safeUsername(member.user.username)}});

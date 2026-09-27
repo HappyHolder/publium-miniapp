@@ -3,6 +3,7 @@ import { prisma } from '../../db';
 import { collaberJson } from './inference';
 import { getChatMember } from '../../lib/telegramBot';
 import { communityManagerExecutor } from '../managedBot';
+import { membershipReaderToken } from '../membership';
 import { parseCommunityManagerConfig } from '../config';
 import { activeFacts, factNeedsConfirmation, factsOf, hash, isThirdPartyIntro, possibleIntro, preferenceCommand, rankFacts, safeUsername, validateFacts, type IntroMessage, type Fact } from './domain';
 import type { CollaberConfig } from './config';
@@ -97,11 +98,12 @@ export async function findCandidates(managerId:string,query:string,userId:string
   }
   const ctx=verifyMembership?await collaberContext(managerId):null;
   const executor=ctx?await communityManagerExecutor(ctx.manager.communityId):null;
+  const readerToken=ctx&&executor?await membershipReaderToken(ctx.manager.communityId,ctx.chatId,executor.token):null;
   const candidates:Candidate[]=[];
   for(const {row,fact} of ranked){
     if(verifyMembership){
-      if(!ctx||!executor)break;
-      const membership=await getChatMember(ctx.chatId,Number(row.tgUserId),executor.token).catch(()=>null);
+      if(!ctx||!readerToken)break;
+      const membership=await getChatMember(ctx.chatId,Number(row.tgUserId),readerToken).catch(()=>null);
       if(!membership)continue;
       const member=['member','administrator','creator'].includes(membership.status)||(membership.status==='restricted'&&(membership as any).is_member===true);
       await prisma.collaberProfile.update({where:{id:row.id},data:{membership:member?'MEMBER':'LEFT'}});if(!member)continue;
