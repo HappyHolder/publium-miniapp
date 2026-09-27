@@ -5,7 +5,7 @@ import { hash, parseArchive } from './domain';
 import { collaberContext, createMatch, ingestIntro, profilePreference } from './service';
 import { communityManagerExecutor } from '../managedBot';
 import { entryPayload } from './telegram';
-import { deliverMatch, matchPresentation } from './delivery';
+import { deliverMatch, emptyMatchText, matchPresentation } from './delivery';
 
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1,fields:2}}).single('file');
 export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:string)=>Promise<any>,fail:(res:Response,e:unknown)=>void){
@@ -15,21 +15,23 @@ export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:strin
   router.get('/',route(async(req,res,id)=>{
     const page=Math.max(0,Math.min(10000,Number(req.query.page)||0)),q=typeof req.query.q==='string'?req.query.q.trim().slice(0,100):'';
     const where={communityManagerId:id,...(q?{participant:{displayName:{contains:q,mode:'insensitive' as const}}}:{})};
-    const [profiles,total,imports,requests]=await Promise.all([
+    const [profiles,total,requests,drafts,imports]=await Promise.all([
       prisma.collaberProfile.findMany({where,include:{participant:{select:{displayName:true,username:true}}},orderBy:{updatedAt:'desc'},skip:page*25,take:25}),
       prisma.collaberProfile.count({where}),
+      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:{notIn:['DRAFT','PREVIEW']}},orderBy:{createdAt:'desc'},take:30}),
+      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:'DRAFT'},orderBy:{createdAt:'desc'},take:30}),
       prisma.collaberImport.findMany({where:{communityManagerId:id},select:{id:true,filename:true,status:true,total:true,skipped:true,processed:true,profiles:true,error:true,createdAt:true},orderBy:{createdAt:'desc'},take:10}),
-      prisma.collaberRequest.findMany({where:{communityManagerId:id},orderBy:{createdAt:'desc'},take:30}),
     ]);
     const ctx=await collaberContext(id,true),executor=ctx?await communityManagerExecutor(ctx.manager.communityId).catch(()=>null):null;
-    const [searchable,publicProfiles,sent,useful,introduced]=await Promise.all([
+    const [searchable,publicProfiles,sent,matched,useful,introduced]=await Promise.all([
       prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,sourceAt:{not:null}}}),
       prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,publicMentions:true}}),
       prisma.collaberRequest.count({where:{communityManagerId:id,status:'SENT'}}),
+      prisma.collaberRequest.count({where:{communityManagerId:id,status:'SENT',NOT:{candidates:{equals:[]}}}}),
       prisma.collaberRequest.count({where:{communityManagerId:id,feedback:'USEFUL'}}),
       prisma.collaberInvite.count({where:{communityManagerId:id,status:'INTRODUCED'}}),
     ]);
-    res.json({profiles,total,page,imports,requests,stats:{searchable,publicProfiles,sent,useful,introduced},entryUrl:executor?.username?'https://t.me/'+executor.username+'?start='+entryPayload(id):null});
+    res.json({profiles,total,page,requests,drafts,imports,stats:{searchable,publicProfiles,sent,matched,useful,introduced},entryUrl:executor?.username?'https://t.me/'+executor.username+'?start='+entryPayload(id):null});
   }));
   router.post('/imports',(req,res,next)=>upload(req,res,e=>{if(e)res.status(400).json({error:'Не удалось загрузить JSON. Максимальный размер — 10 МБ.'});else next()}),route(async(req,res,id)=>{
     if(!req.file)throw new Error('Выберите JSON-файл истории');
@@ -65,7 +67,7 @@ export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:strin
   router.post('/preview',route(async(req,res,id)=>{
     const query=typeof req.body?.query==='string'?req.body.query.trim().slice(0,500):'';if(query.length<4)throw new Error('Опишите задачу для подбора');
     const request=await createMatch({managerId:id,userId:res.locals.owner.tgUserId,chatId:res.locals.owner.tgUserId,query,dedupeKey:'preview:'+id+':'+Date.now(),preview:true});
-    const ctx=await collaberContext(id,true);res.json({request,presentation:matchPresentation(request,ctx!.config.features.collaber)});
+    const ctx=await collaberContext(id,true);res.json({request,presentation:matchPresentation(request,ctx!.config.features.collaber,await emptyMatchText(id,res.locals.owner.tgUserId,false))});
   }));
   router.post('/requests/:requestId/:action',route(async(req,res,id)=>{
     const request=await prisma.collaberRequest.findFirst({where:{id:req.params.requestId,communityManagerId:id,status:'DRAFT'}});if(!request)throw new Error('Черновик не найден');

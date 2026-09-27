@@ -9,6 +9,7 @@ import { deliverMatch, deliverMessage } from './delivery';
 import { canAct, contactUrl, preferenceCommand, safeUsername, type IntroMessage } from './domain';
 
 const signature=(text:string)=>createHmac('sha256',env.COMMUNITY_MANAGER_WEBHOOK_SECRET||env.TELEGRAM_BOT_TOKEN).update(text).digest('base64url').slice(0,16);
+const menu=(id:string)=>({inline_keyboard:[[{text:'Заполнить интро',callback_data:`cm:${id}:edit`},{text:'Мой профиль',callback_data:`cm:${id}:profile`}],[{text:'Найти партнёра',callback_data:`cm:${id}:search`}]]});
 export function entryPayload(managerId:string,now?:number){const data=managerId+'_'+(now===undefined?'0':Math.floor(now/1000).toString(36));return'co_'+data+'_'+signature(data)}
 export function parseEntry(payload:string,now=Date.now()){
   const m=/^co_([a-z0-9]+)_([a-z0-9]+)_([A-Za-z0-9_-]{16})$/.exec(payload);if(!m)return null;
@@ -19,7 +20,14 @@ export async function acceptCollaberUpdate(update:any,executor:{type:'SHARED'|'C
   const callback=update.callback_query,m=update.message, userId=String(callback?.from?.id??m?.from?.id??'');
   if(!Number.isInteger(update.update_id)||!/^\d+$/.test(userId)||callback?.from?.is_bot||m?.from?.is_bot)return false;
   let managerId:string|undefined;
-  if(callback?.data?.startsWith('cb:')){
+  if(callback?.data?.startsWith('cp:')){
+    const row=await prisma.collaberProfile.findUnique({where:{id:String(callback.data).split(':')[1]}});
+    if(row?.tgUserId===userId)managerId=row.communityManagerId;
+  }else if(callback?.data?.startsWith('cm:')&&callback.message?.chat?.type==='private'){
+    const [,id,action]=String(callback.data).split(':');
+    const session=await prisma.collaberSession.findUnique({where:{botId_tgUserId:{botId:String(executor.botId),tgUserId:userId}}});
+    if(session?.communityManagerId===id&&session.expiresAt>new Date()&&['edit','profile','search','public','private'].includes(action))managerId=id;
+  }else if(callback?.data?.startsWith('cb:')){
     const parts=String(callback.data).split(':');
     const row=['yes','no'].includes(parts[1])?await prisma.collaberInvite.findUnique({where:{id:parts[2]}}):await prisma.collaberRequest.findUnique({where:{id:parts[2]}});
     managerId=row?.communityManagerId;
@@ -27,7 +35,7 @@ export async function acceptCollaberUpdate(update:any,executor:{type:'SHARED'|'C
     const payload=/^\/start(?:@\w+)?\s+(\S+)/.exec(m.text??'')?.[1];
     managerId=payload?parseEntry(payload)??undefined:(await prisma.collaberSession.findUnique({where:{botId_tgUserId:{botId:String(executor.botId),tgUserId:userId}}}))?.communityManagerId;
   }else return false;
-  if(!managerId)return Boolean(callback?.data?.startsWith('cb:')||m?.text?.startsWith('/start co_'));
+  if(!managerId)return Boolean(/^(cb|cp|cm):/.test(callback?.data??'')||m?.text?.startsWith('/start co_'));
   const ctx=await collaberContext(managerId);if(!ctx||ctx.manager.executorType!==executor.type||executor.communityId&&ctx.manager.communityId!==executor.communityId)return true;
   const currentExecutor=await communityManagerExecutor(ctx.manager.communityId);if(currentExecutor.botId!==executor.botId)return true;
   if(callback)await answerBotCallback(callback.id,'Проверяю…',currentExecutor.token).catch(()=>undefined);
@@ -51,6 +59,26 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
   if(String(ctx.executor.botId)!==p.botId)throw new Error('Исполнитель изменился');
   const say=(text:string,keyboard?:any)=>deliverMessage(managerId,userId,text,keyboard,task.id);
   const sessionKey={botId_tgUserId:{botId:p.botId,tgUserId:userId}};
+  if(p.callback?.data?.startsWith('cm:')){
+    const [,id,action]=String(p.callback.data).split(':');
+    if(id!==managerId||p.callback.chatId!==userId||!['edit','profile','search','public','private'].includes(action))return;
+    p.text='/'+action;p.callback=null;
+  }
+  if(p.callback?.data?.startsWith('cp:')){
+    const [,profileId,action]=String(p.callback.data).split(':');
+    if(!['public','private'].includes(action)||p.callback.chatId!==ctx.chatId)return;
+    const profile=await prisma.collaberProfile.findFirst({where:{id:profileId,communityManagerId:managerId,tgUserId:userId,searchable:true,forgotten:false}});if(!profile)return;
+    const consent=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+managerId+':'+userId}});if(!consent||consent.status!=='WAITING')return;
+    const accepted=await prisma.$transaction(async tx=>{
+      const claim=await tx.collaberTask.updateMany({where:{id:consent.id,status:'WAITING'},data:{status:'COMPLETED'}});if(!claim.count)return false;
+      const current=await tx.collaberProfile.updateMany({where:{id:profile.id,searchable:true,forgotten:false},data:{publicMentions:action==='public'}});
+      if(current.count&&action==='public')await tx.collaberTask.upsert({where:{dedupeKey:'consent-propose:'+consent.id},create:{communityManagerId:managerId,kind:'PROPOSE',dedupeKey:'consent-propose:'+consent.id,payload:{userId,sourceMessageId:(consent.payload as any).sourceMessageId}},update:{}});
+      return Boolean(current.count);
+    });
+    if(!accepted)return;
+    await deliverMessage(managerId,ctx.chatId,action==='public'?'Разрешение сохранено. Если найдётся подходящий человек, предложу знакомство ответом на твоё интро.':'Сохранено: профиль доступен только для личного подбора.',undefined,task.id,undefined,(consent.payload as any).sourceMessageId);
+    return;
+  }
   if(p.callback){
     const [,kind,id,index]=String(p.callback.data).split(':');
     if(kind==='yes'||kind==='no'){
@@ -71,7 +99,7 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     if(!request||!canAct(request.tgUserId,userId))return;
     const replyChat=request.chatId; // Never assume a group user has started a private conversation.
     const respond=(text:string,keyboard?:any)=>deliverMessage(managerId,replyChat,text,keyboard,task.id,undefined,request.telegramMessageId??undefined);
-    if(kind==='f'||kind==='good'){await prisma.collaberRequest.update({where:{id},data:{feedback:kind==='good'?'USEFUL':'NOT_USEFUL'}});await respond(kind==='good'?'Спасибо, отметил полезный подбор. Это ещё не означает, что знакомство состоялось.':'Отметил: подбор не подошёл. Уточни задачу, чтобы я изменил поиск.');return}
+    if(kind==='f'||kind==='good'){if(!Array.isArray(request.candidates)||!request.candidates.length)return;await prisma.collaberRequest.update({where:{id},data:{feedback:kind==='good'?'USEFUL':'NOT_USEFUL'}});await respond(kind==='good'?'Спасибо, отметил полезный подбор. Это ещё не означает, что знакомство состоялось.':'Отметил: подбор не подошёл. Уточни задачу, чтобы я изменил поиск.');return}
     if(kind==='r'){await respond('Напиши, что изменить: нужные навыки, тематику или формат сотрудничества. Можно продолжить в личном диалоге.',{inline_keyboard:[[{text:'Уточнить в личном диалоге',url:'https://t.me/'+ctx.executor.username+'?start='+entryPayload(managerId)}]]});return}
     const candidate=(request.candidates as unknown as Candidate[])[Number(index)];if(!candidate)return;
     const profile=await prisma.collaberProfile.findFirst({where:{id:candidate.id,communityManagerId:managerId,searchable:true,forgotten:false,...(replyChat.startsWith('-')?{publicMentions:true}:{})},include:{participant:true}});if(!profile)return;
@@ -98,12 +126,13 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     const participant=await prisma.communityManagerParticipant.upsert({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:userId}},create:{communityManagerId:managerId,tgUserId:userId,displayName:p.name||'Участник',username:p.username},update:{}});
     await prisma.collaberProfile.upsert({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:userId}},create:{communityManagerId:managerId,participantId:participant.id,tgUserId:userId,membership:'MEMBER'},update:{membership:'MEMBER'}});
     await prisma.collaberSession.upsert({where:sessionKey,create:{communityManagerId:managerId,tgUserId:userId,botId:p.botId,expiresAt:new Date(Date.now()+30*86400000)},update:{communityManagerId:managerId,state:'SEARCH',expiresAt:new Date(Date.now()+30*86400000)}});
-    await say('Для какой задачи ищешь человека? Опиши нужную помощь и что можешь предложить.\n\n/profile — мой профиль\n/edit — исправить интро\n/public — разрешить рекомендации обо мне в группе\n/hide — не предлагать меня\n/show — участвовать в подборе\n/forget — удалить данные Collaber');return;
+    await say('Помогу найти людей в твоём сообществе. Напиши, какая помощь нужна — например: «Ищу маркетолога для мини-приложения».\n\nЧтобы тебя тоже могли найти, расскажи о себе через кнопку «Заполнить интро» или напиши интро в группе. /hide — скрыть профиль, /forget — удалить данные.',menu(managerId));return;
   }
   const session=await prisma.collaberSession.findUnique({where:sessionKey});if(!session||session.communityManagerId!==managerId||session.expiresAt<new Date())return;
+  if(text==='/search'){await prisma.collaberSession.update({where:sessionKey,data:{state:'SEARCH'}});await say('Напиши, для какой задачи ищешь человека и какая помощь нужна.');return}
   if(text==='/profile'){
     const profile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:userId}}});
-    await say(`Твой профиль: ${profile?.searchable?'участвует в поиске':'скрыт'}. Публичные рекомендации: ${profile?.publicMentions?'разрешены':'выключены'}.\n${profile?.sourceText.slice(0,2500)||'Интро пока нет.'}\n\n/edit — изменить интро\n/public — разрешить публичные рекомендации\n/private — запретить публичные рекомендации`);return;
+    await say(`Твой профиль: ${profile?.searchable?'участвует в поиске':'скрыт'}. Публичные рекомендации: ${profile?.publicMentions?'разрешены':'выключены'}.\n${profile?.sourceText.slice(0,2500)||'Интро пока нет.'}`,{inline_keyboard:[...menu(managerId).inline_keyboard,[{text:profile?.publicMentions?'Запретить показ в группе':'Разрешить показ в группе',callback_data:`cm:${managerId}:${profile?.publicMentions?'private':'public'}`}]]});return;
   }
   if(text==='/public'||text==='/private'){await prisma.collaberProfile.updateMany({where:{communityManagerId:managerId,tgUserId:userId},data:{publicMentions:text==='/public'}});await say('Видимость публичных рекомендаций обновлена.');return}
   if(text==='/edit'){await prisma.collaberSession.update({where:sessionKey,data:{state:'EDIT'}});await say('Пришли новое интро: проекты, навыки, чем можешь помочь и кого ищешь. Оно заменит сохранённое описание.');return}

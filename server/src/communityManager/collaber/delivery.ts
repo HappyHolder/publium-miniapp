@@ -10,22 +10,30 @@ import { contactUrl } from './domain';
 import { memberAccess } from './telegram';
 import type { CollaberConfig } from './config';
 
-export function matchPresentation(request:{id:string;query:string;candidates:unknown},config:CollaberConfig){
+export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
   const candidates=Array.isArray(request.candidates)?request.candidates as Candidate[]:[];
-  const paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:['Пока не нашёл достаточно надёжных совпадений. Уточни, какая помощь нужна и что можешь предложить. Если в профиле мало данных, пришли своё интро.'];
+  const paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
   const keyboard:TelegramInlineKeyboard={inline_keyboard:[]};
   candidates.forEach((candidate,index)=>{
-    const url=contactUrl(candidate.username,request.query);
+    const url=contactUrl(candidate.username,request.initiative?'возможное сотрудничество по твоему интро':request.query);
     if(config.buttons.contact&&url)keyboard.inline_keyboard.push([{text:('Написать '+candidate.name).slice(0,60),url}]);
     if(config.buttons.intro)keyboard.inline_keyboard.push([{text:('Интро: '+candidate.name).slice(0,60),callback_data:`cb:i:${request.id}:${index}`}]);
     if(config.buttons.introduce)keyboard.inline_keyboard.push([{text:('Познакомить: '+candidate.name).slice(0,60),callback_data:`cb:n:${request.id}:${index}`}]);
   });
-  if(config.buttons.refine)keyboard.inline_keyboard.push([{text:'Уточнить подбор',callback_data:`cb:r:${request.id}:0`},{text:'Не подходит',callback_data:`cb:f:${request.id}:0`}]);
+  if(config.buttons.refine)keyboard.inline_keyboard.push([{text:'Уточнить подбор',callback_data:`cb:r:${request.id}:0`},...(candidates.length?[{text:'Не подходит',callback_data:`cb:f:${request.id}:0`}]:[])]);
   if(config.buttons.refine&&candidates.length)keyboard.inline_keyboard.push([{text:'Полезный подбор',callback_data:`cb:good:${request.id}:0`}]);
   const blocks:PostBlock[]=[];
-  if(config.showImage&&config.imageUrl)blocks.push({type:'image',url:config.imageUrl.startsWith('/')?env.PUBLIC_BASE_URL+config.imageUrl:config.imageUrl});
-  for(const text of paragraphs.filter(Boolean))blocks.push({type:'paragraph',runs:[{t:text}]});
+  if(candidates.length&&config.showImage&&config.imageUrl)blocks.push({type:'image',url:config.imageUrl.startsWith('/')?env.PUBLIC_BASE_URL+config.imageUrl:config.imageUrl});
+  for(const text of paragraphs.filter(Boolean).flatMap(p=>p.split(/\n+/)))blocks.push({type:'paragraph',runs:[{t:text}]});
   return {text:paragraphs.filter(Boolean).join('\n\n'),html:blocksToRichHtml(blocks),keyboard};
+}
+
+export async function emptyMatchText(managerId:string,userId:string,publicOnly:boolean){
+  const where={communityManagerId:managerId,tgUserId:{not:userId},searchable:true,forgotten:false,sourceAt:{not:null},membership:{not:'LEFT'}};
+  const count=await prisma.collaberProfile.count({where});
+  if(!count)return 'В базе этого сообщества пока нет других участников с заполненным интро. Подбор станет доступен, когда они расскажут о себе в группе.';
+  if(publicOnly&&!await prisma.collaberProfile.count({where:{...where,publicMentions:true}}))return 'Пока нет профилей, разрешённых для публичного подбора. Можно продолжить поиск в личном диалоге с ботом.';
+  return 'Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.';
 }
 
 /** All Collaber messages share CM limits, pause checks, subscription accounting and journal. */
@@ -78,14 +86,15 @@ export async function deliverMatch(requestId:string,managerId:string,approved=fa
     const count=await prisma.collaberRequest.count({where:{communityManagerId:managerId,initiative:true,status:{in:['SENDING','SENT','UNCERTAIN']},updatedAt:{gte:new Date(Date.now()-86400000)}}});
     if(count>=cfg.maxInitiativesPerDay||isQuietHour(ctx.config))return;
     const state=await prisma.communityManagerConversationState.findUnique({where:{communityManagerId:managerId}});
-    if(state?.lastHumanAt&&state.lastHumanAt>new Date(Date.now()-ctx.config.replies.ambientCooldownMinutes*60000))return;
+    // A reply to an intro belongs to that conversation; only standalone initiatives wait for silence.
+    if(!request.sourceMessageId&&state?.lastHumanAt&&state.lastHumanAt>new Date(Date.now()-ctx.config.replies.ambientCooldownMinutes*60000))return;
     if(state?.pendingModeratorAt&&state.pendingModeratorAt>new Date(Date.now()-30*60000))return;
     const activity=await prisma.communityManagerActivity.findFirst({where:{communityManagerId:managerId,status:{in:['PROCESSING','RUNNING','SENDING','ACTIVE']}}});if(activity)return;
   }else if(!cfg.onDemand)return;
   const candidates=await findCandidates(managerId,request.query,request.tgUserId,cfg,request.chatId.startsWith('-'));
-  if(request.initiative&&!candidates.length)return;
+  if(request.initiative&&!candidates.length){await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'NO_MATCH',candidates:[]}});return}
   const claim=await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'SENDING',candidates:candidates as any}});if(!claim.count)return;
-  const presentation=matchPresentation({...request,candidates},cfg);
+  const presentation=matchPresentation({...request,candidates},cfg,candidates.length?undefined:await emptyMatchText(managerId,request.tgUserId,request.chatId.startsWith('-')));
   try{
     const ref=await deliverMessage(managerId,request.chatId,presentation.text,presentation.keyboard,request.id,presentation.html,request.sourceMessageId??undefined,request.initiative,async()=>{
       await memberAccess(managerId,request.tgUserId);

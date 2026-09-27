@@ -9,7 +9,7 @@ const {env}=require('../dist/env.js');
 const ai=require('../dist/communityManager/collaber/inference.js');
 const telegram=require('../dist/lib/telegramBot.js');
 const {DEFAULT_CM_CONFIG}=require('../dist/communityManager/config.js');
-const {ingestIntro,findCandidates,createMatch,profilePreference}=require('../dist/communityManager/collaber/service.js');
+const {ingestIntro,findCandidates,createMatch,profilePreference,queueLiveIntro}=require('../dist/communityManager/collaber/service.js');
 const {deliverMatch}=require('../dist/communityManager/collaber/delivery.js');
 const {processCollaberJobs}=require('../dist/communityManager/collaber/worker.js');
 const {processTelegramTask,acceptCollaberUpdate,entryPayload}=require('../dist/communityManager/collaber/telegram.js');
@@ -18,18 +18,19 @@ const express=require('express');
 const originalFetch=globalThis.fetch;
 globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
 env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
-let sends=0,ambiguous=false;
+let sends=0,ambiguous=false,noMatches=false;const deliveries=[];
 env.MODERATOR_BOT_TOKEN='200:moderator-test';
 telegram.getChatMember=async(chat,user,token)=>{
  if(token==='100:test'&&Number(user)!==100)throw new Error('Non-admin CM must not verify other users');
  return {status:Number(user)===200?'administrator':'member',user:{id:Number(user),first_name:'Участник '+user,username:'current_'+user}};
 };
-telegram.sendRichMessage=telegram.sendBotMessage=async chat=>{sends++;if(ambiguous)throw new Error('Simulated connection loss');return {chatId:Number(chat),messageId:900+sends}};
+telegram.sendRichMessage=async(chat,html,token,keyboard,replyId)=>{sends++;deliveries.push({chat,html,keyboard,replyId});if(ambiguous)throw new Error('Simulated connection loss');return {chatId:Number(chat),messageId:900+sends}};
+telegram.sendBotMessage=async(chat,text,token,keyboard,parseMode,replyId)=>{sends++;deliveries.push({chat,text,keyboard,replyId});if(ambiguous)throw new Error('Simulated connection loss');return {chatId:Number(chat),messageId:900+sends}};
 ai.collaberJson=async(managerId,stage,{prompt,system})=>{
  const p=JSON.parse(prompt);
  if(system.startsWith('Extract'))return {facts:[{kind:'offer',value:p.message,evidence:p.message}],closedNeedsEvidence:null};
  if(system.startsWith('Given'))return{keywords:['маркетинг','продвижение']};
- if(system.startsWith('Rank'))return{ids:p.candidates.slice(0,3).map(x=>x.id)};
+ if(system.startsWith('Rank'))return{ids:noMatches?[]:p.candidates.slice(0,3).map(x=>x.id)};
  throw new Error('Unexpected inference');
 };
 const tag=randomUUID();let user,community,other,moderatorChat,httpServer;
@@ -39,7 +40,7 @@ try{
  moderatorChat=await prisma.moderatorChat.create({data:{tgChatId:chat.tgChatId,title:chat.title,type:'supergroup',botStatus:'administrator'}});
  community=await prisma.community.create({data:{chatId:chat.id,moderatorChatId:moderatorChat.id}});
  other=await prisma.community.create({data:{}});
- const config=structuredClone(DEFAULT_CM_CONFIG);config.features.collaber.enabled=true;config.features.collaber.initiatives='off';config.limits.quietEnabled=false;
+ const config=structuredClone(DEFAULT_CM_CONFIG);config.features.collaber.enabled=true;config.features.collaber.initiatives='off';config.limits.quietEnabled=false;config.limits.maxRepliesPerHour=100;config.limits.maxRepliesPerDay=100;
  const manager=await prisma.communityManager.create({data:{communityId:community.id,enabled:true,publishedVersion:1,draftVersion:1,configs:{create:{version:1,status:'PUBLISHED',config}}}});
  const foreign=await prisma.communityManager.create({data:{communityId:other.id}});
  const intro={id:'10',userId:'42',name:'Анна',username:'old_name',text:'Занимаюсь маркетингом и предлагаю продвижение приложений.',at:new Date().toISOString()};
@@ -118,6 +119,66 @@ try{
  assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,dedupeKey:'telegram:100:8675309'}}),1);
  console.log('PASS callback ownership, two-party consent, repeated acceptance and webhook deduplication');
 
+
+ // Group-first onboarding uses actual source message IDs and no private session.
+ const saveConfig=()=>prisma.communityManagerConfig.update({where:{communityManagerId_version:{communityManagerId:manager.id,version:1}},data:{config}});
+ config.features.collaber.initiatives='auto';config.features.collaber.periodicDays=0;config.features.collaber.maxInitiativesPerDay=5;
+ config.features.collaber.imageUrl='https://example.com/cover.png';config.replies.conversationMemory=true;await saveConfig();
+ await ingestIntro(manager.id,{...intro,id:'600',userId:'60',at:new Date().toISOString()},config.features.collaber);
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'60'},data:{publicMentions:true}});
+ await queueLiveIntro(manager.id,{message_id:700,from:{id:56,first_name:'Борис',username:'boris_test'},text:'#intro Меня зовут Борис. Разрабатываю мини-приложение и могу помочь с интеграциями.',date:Math.floor(Date.now()/1000)});
+ for(let i=0;i<5&&!deliveries.some(d=>d.replyId===700);i++)await processCollaberJobs();
+ const boris=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'56'}}});
+ assert.ok(boris);assert.equal(boris.publicMentions,false);assert.equal(await prisma.collaberSession.count({where:{communityManagerId:manager.id,tgUserId:'56'}}),0);
+ const prompt=deliveries.find(d=>d.replyId===700);assert.equal(prompt.chat,chat.tgChatId);assert.match(prompt.keyboard.inline_keyboard[0][0].callback_data,/^cp:/);
+ const publicButton=prompt.keyboard.inline_keyboard[0][0].callback_data;
+ const beforeStranger=sends;await processTelegramTask(task('99',publicButton));assert.equal(sends,beforeStranger);
+ assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,false);
+ await processTelegramTask(task('56',publicButton));const afterPublic=sends;
+ await processTelegramTask(task('56',publicButton));assert.equal(sends,afterPublic);
+ assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,true);
+ console.log('PASS live group intro saves profile; author-only public consent works without starting a private bot session');
+
+ // Quiet hours defer a reply; disabling periodic checks must not disable retries.
+ const localHour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:config.limits.timezone,hour:'numeric',hourCycle:'h23'}).format(new Date()));
+ config.limits.quietEnabled=true;config.limits.quietFrom=localHour;config.limits.quietTo=(localHour+1)%24;await saveConfig();
+ await processCollaberJobs();
+ let proposal=await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'56',initiative:true}});
+ assert.equal(proposal.status,'DRAFT');assert.equal(proposal.sourceMessageId,700);assert.ok(proposal.candidates.length);
+ const draftData=await (await fetch(base+manager.id+'/collaber',{headers})).json();
+ assert.ok(draftData.drafts.some(r=>r.id===proposal.id));assert.ok(!draftData.requests.some(r=>r.id===proposal.id));
+ config.limits.quietEnabled=false;await saveConfig();
+ await prisma.communityManagerConversationState.upsert({where:{communityManagerId:manager.id},create:{communityManagerId:manager.id,lastHumanAt:new Date()},update:{lastHumanAt:new Date()}});
+ await processCollaberJobs();
+ proposal=await prisma.collaberRequest.findUnique({where:{id:proposal.id}});assert.equal(proposal.status,'SENT');
+ const groupMatch=deliveries.find(d=>d.replyId===700&&d.html);assert.ok(groupMatch.html.includes('cover.png'));
+ assert.equal(groupMatch.chat,chat.tgChatId);
+ console.log('PASS intro match replies to source despite current conversation; quiet-hour retry works with periodicDays=0');
+
+ noMatches=true;
+ await prisma.collaberProfile.update({where:{id:boris.id},data:{publicMentions:false}});
+ await queueLiveIntro(manager.id,{message_id:701,from:{id:57,first_name:'Вера'},text:'#intro Меня зовут Вера. Предлагаю маркетинг для мини-приложений.',date:Math.floor(Date.now()/1000)});
+ await processCollaberJobs();await processCollaberJobs();
+ const vera=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'57'}}});
+ await processTelegramTask(task('57','cp:'+vera.id+':private'));const beforePrivate=sends;
+ await processCollaberJobs();assert.equal(sends,beforePrivate);
+ assert.equal((await prisma.collaberProfile.findUnique({where:{id:vera.id}})).publicMentions,false);
+ assert.equal(await prisma.collaberRequest.count({where:{communityManagerId:manager.id,tgUserId:'57',initiative:true}}),0);
+ // Explicitly allowed new author, no candidates: silent group result.
+ await ingestIntro(manager.id,{...intro,id:'702',userId:'58',at:new Date().toISOString()},config.features.collaber);
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'58'},data:{publicMentions:true}});
+ const {propose}=require('../dist/communityManager/collaber/proposals.js');
+ const beforeEmpty=sends;await propose(manager.id,'58','no-match-test',702);assert.equal(sends,beforeEmpty);
+ assert.equal((await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'58',initiative:true}})).status,'NO_MATCH');
+ const empty=await createMatch({managerId:manager.id,userId:'58',chatId:'58',query:'ищу маркетолога',dedupeKey:'empty-'+tag});
+ await deliverMatch(empty.id,manager.id);const emptyDelivery=deliveries.at(-1);
+ assert.ok(!emptyDelivery.html.includes('cover.png'));assert.equal(emptyDelivery.keyboard.inline_keyboard.length,1);assert.equal(emptyDelivery.keyboard.inline_keyboard[0].length,1);
+ await processTelegramTask(task('58','cb:good:'+empty.id+':0'));
+ assert.equal((await prisma.collaberRequest.findUnique({where:{id:empty.id}})).feedback,null);
+ const resultsData=await (await fetch(base+manager.id+'/collaber',{headers})).json();
+ assert.ok(resultsData.stats.sent>resultsData.stats.matched);assert.ok(resultsData.requests.every(r=>!['PREVIEW','DRAFT'].includes(r.status)));
+ console.log('PASS private-only consent, silent empty group match, plain empty personal reply, feedback guard and meaningful owner statistics');
+ noMatches=false;
  await profilePreference(manager.id,'42','forget');
  const removed=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
  assert.equal(removed.forgotten,true);assert.equal(removed.sourceText,'');assert.deepEqual(removed.facts,[]);

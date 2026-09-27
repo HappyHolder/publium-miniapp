@@ -1,10 +1,12 @@
 import { prisma } from '../../db';
-import { collaberContext, createMatch, ingestIntro } from './service';
+import { collaberContext, ingestIntro } from './service';
+import { afterLiveIntro, propose, sendConsentPrompt } from './proposals';
+import { isQuietHour } from '../config';
 import { activeFacts, preferenceCommand, type IntroMessage } from './domain';
 import { processTelegramTask } from './telegram';
 import { deliverMatch } from './delivery';
 
-let running=false, lastPeriodic=0;
+let running=false, lastPeriodic=0, lastDeliveryRetry=0;
 export async function processCollaberJobs(){
   if(running)return;running=true;
   try{
@@ -23,7 +25,12 @@ export async function processCollaberJobs(){
         // A crash after dispatch must not replay an uncertain Telegram send.
         const previous=await prisma.communityManagerAction.findFirst({where:{communityManagerId:task.communityManagerId,status:{in:['SENDING','COMPLETED','UNCERTAIN']},metadata:{path:['collaberKey'],equals:task.id}}});
         if(previous){await prisma.collaberTask.update({where:{id:task.id},data:{status:'UNCERTAIN',payload:{},leaseUntil:null}});return}
+        if(task.kind==='CONSENT_PROMPT'&&isQuietHour(ctx.config)){
+          await prisma.collaberTask.update({where:{id:task.id},data:{status:'PENDING',attempts:{decrement:1},runAfter:new Date(Date.now()+60000),leaseUntil:null}});return;
+        }
         if(task.kind==='TELEGRAM')await processTelegramTask(task);
+        else if(task.kind==='CONSENT_PROMPT')await sendConsentPrompt(task);
+        else if(task.kind==='PROPOSE'){const p=task.payload as any;await propose(task.communityManagerId,p.userId,'consent:'+task.id,p.sourceMessageId)}
         else if(task.kind==='INTRO'){
           const m=(task.payload as any).message as IntroMessage;
           const after=(task.payload as any).moderationAfter;
@@ -33,7 +40,7 @@ export async function processCollaberJobs(){
             if(event.action!=='ALLOW'){await prisma.collaberTask.update({where:{id:task.id},data:{status:'CANCELLED',payload:{},leaseUntil:null}});return}
           }
           if(preferenceCommand(m.text)||(ctx.config.features.collaber.collectIntros&&ctx.config.replies.conversationMemory)){
-            if(await ingestIntro(task.communityManagerId,m,ctx.config.features.collaber,false,true))await propose(task.communityManagerId,m.userId,'intro:'+task.id);
+            if(await ingestIntro(task.communityManagerId,m,ctx.config.features.collaber,false,true))await afterLiveIntro(task.communityManagerId,m);
           }
         }
         await prisma.collaberTask.updateMany({where:{id:task.id,status:'PROCESSING'},data:{status:'COMPLETED',payload:{},leaseUntil:null,error:null}});
@@ -59,30 +66,21 @@ export async function processCollaberJobs(){
       }catch(error){await prisma.collaberImport.updateMany({where:{id:batch.id,status:'PROCESSING'},data:{status:batch.attempts>=2?'FAILED':'PENDING',attempts:{increment:1},leaseUntil:null,error:error instanceof Error?error.message.slice(0,300):'Ошибка импорта'}})}
       return;
     }
+    if(Date.now()-lastDeliveryRetry>60000){lastDeliveryRetry=Date.now();
+      const waiting=await prisma.collaberRequest.findMany({where:{initiative:true,status:'DRAFT',createdAt:{gte:new Date(Date.now()-7*86400000)}},orderBy:{updatedAt:'asc'},take:20});
+      for(const request of waiting)await deliverMatch(request.id,request.communityManagerId).catch(()=>undefined);
+    }
     if(Date.now()-lastPeriodic>3600000){lastPeriodic=Date.now();
       const managers=await prisma.communityManager.findMany({where:{enabled:true,publishedVersion:{not:null}},select:{id:true}});
       for(const m of managers){
         const ctx=await collaberContext(m.id);if(!ctx?.config.features.collaber.enabled)continue;
         const cfg=ctx.config.features.collaber;if(cfg.initiatives==='off'||!cfg.periodicDays)continue;
-        if(cfg.initiatives==='auto'){
-          const waiting=await prisma.collaberRequest.findFirst({where:{communityManagerId:m.id,initiative:true,status:'DRAFT',createdAt:{gte:new Date(Date.now()-7*86400000)}},orderBy:{createdAt:'asc'}});
-          if(waiting){await deliverMatch(waiting.id,m.id).catch(()=>undefined);continue}
-        }
         const profiles=await prisma.collaberProfile.findMany({where:{communityManagerId:m.id,searchable:true,publicMentions:true,forgotten:false,sourceAt:{gte:new Date(Date.now()-cfg.freshnessDays*86400000)},OR:[{lastProposedAt:null},{lastProposedAt:{lt:new Date(Date.now()-cfg.periodicDays*86400000)}}]},orderBy:{sourceAt:'desc'},take:100});
         const profile=profiles.find(p=>activeFacts(p.facts).some(f=>f.kind==='need'));
         if(profile)await propose(m.id,profile.tgUserId,'periodic:'+Math.floor(Date.now()/(cfg.periodicDays*86400000)));
       }
     }
     await prisma.collaberImport.updateMany({where:{createdAt:{lt:new Date(Date.now()-7*86400000)},status:{in:['PREVIEW','FAILED','CANCELLED']}},data:{messages:[],status:'EXPIRED'}});
-    await prisma.collaberTask.deleteMany({where:{kind:{not:'SUPPRESSION'},createdAt:{lt:new Date(Date.now()-30*86400000)},status:{in:['COMPLETED','CANCELLED','FAILED']}}});
+    await prisma.collaberTask.deleteMany({where:{kind:{notIn:['SUPPRESSION','CONSENT']},createdAt:{lt:new Date(Date.now()-30*86400000)},status:{in:['COMPLETED','CANCELLED','FAILED']}}});
   }finally{running=false}
-}
-async function propose(managerId:string,userId:string,key:string){
-  const ctx=await collaberContext(managerId);if(!ctx||ctx.config.features.collaber.initiatives==='off')return;
-  const profile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:userId}}});
-  if(!profile?.searchable||!profile.publicMentions||profile.forgotten)return;
-  const facts=activeFacts(profile.facts),query=facts.filter(f=>f.kind==='need').map(f=>f.value).join('; ').slice(0,500);if(!query)return;
-  const recent=await prisma.collaberRequest.findFirst({where:{communityManagerId:managerId,tgUserId:userId,initiative:true,createdAt:{gt:new Date(Date.now()-86400000)}}});if(recent)return;
-  const request=await createMatch({managerId,userId,chatId:ctx.chatId,query,dedupeKey:managerId+':'+userId+':'+key,initiative:true});
-  if(ctx.config.features.collaber.initiatives==='auto')await deliverMatch(request.id,managerId);
 }

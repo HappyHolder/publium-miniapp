@@ -5,6 +5,7 @@ import { parseCollaber, DEFAULT_COLLABER } from './collaber/config';
 import { parseArchive, validateFacts, activeFacts, factsOf, factNeedsConfirmation, rankFacts, preferenceCommand, contactUrl, canAct, possibleIntro, isThirdPartyIntro, type IntroMessage } from './collaber/domain';
 import { entryPayload, parseEntry } from './collaber/telegram';
 import { matchPresentation } from './collaber/delivery';
+import { introQuery } from './collaber/proposals';
 
 const message:IntroMessage={id:'17',userId:'42',name:'Анна',username:'annatest',text:'Меня зовут Анна. Разрабатываю приложение для изучения языков. Ищу партнёров для обмена аудиторией.',at:'2026-09-01T00:00:00.000Z'};
 test('relay intro is never attributed to the sender when export omits is_bot',()=>{
@@ -66,7 +67,24 @@ test('message respects image and button settings; interpolated text is escaped',
  const plain=matchPresentation(request,{...config,showImage:false,buttons:{contact:false,intro:false,introduce:false,refine:false}});assert.ok(!plain.html.includes('cover.png'));assert.deepEqual(plain.keyboard.inline_keyboard,[]);
 });
 test('no candidates produces a useful empty state rather than invented people',()=>{
- const result=matchPresentation({id:'r',query:'задача',candidates:[]},DEFAULT_COLLABER);assert.match(result.text,/не нашёл/);assert.ok(result.keyboard.inline_keyboard.every(row=>row.every(b=>!b.url)));
+ const result=matchPresentation({id:'r',query:'задача',candidates:[]},{...DEFAULT_COLLABER,imageUrl:'https://example.com/cover.png'});assert.match(result.text,/не нашёл/);assert.ok(!result.html.includes('cover.png'));
+ assert.deepEqual(result.keyboard.inline_keyboard,[[{text:'Уточнить подбор',callback_data:'cb:r:r:0'}]]);
+});
+
+test('new intro can suggest collaboration from an offer, but periodic initiatives require a fresh need',()=>{
+ const source={...message,at:new Date().toISOString()};
+ const offer=validateFacts([{kind:'offer',value:'x',evidence:'Разрабатываю приложение для изучения языков.'}],source,90);
+ assert.match(introQuery(offer,'Обмен опытом',true),/Разрабатываю приложение/);
+ assert.equal(introQuery(offer,'Обмен опытом',false),'');
+ const need=validateFacts([{kind:'need',value:'x',evidence:'Ищу партнёров для обмена аудиторией.'}],source,90);
+ assert.equal(introQuery(need,'Обмен опытом',false),'Ищу партнёров для обмена аудиторией.');
+ assert.equal(introQuery([],'Обмен опытом',true),'');
+ assert.equal(introQuery(need.map(f=>({...f,expiresAt:'2020-01-01'})),'Обмен опытом',false),'');
+});
+
+test('rich result keeps names, description and reason in separate paragraphs',()=>{
+ const result=matchPresentation({id:'r',query:'партнёр',candidates:[{name:'Анна',description:'Создаёт приложение',reason:'Предлагает продвижение',at:message.at}]},DEFAULT_COLLABER);
+ assert.match(result.html,/<p>1\. Анна<\/p>/);assert.match(result.html,/<p>Создаёт приложение<\/p>/);assert.match(result.html,/<p>Предлагает продвижение<\/p>/);
 });
 test('candidate facts distinguish useful offers from irrelevant words',()=>{
  const facts=validateFacts([{kind:'offer',value:'x',evidence:'Разрабатываю приложение для изучения языков.'}],message,90);
