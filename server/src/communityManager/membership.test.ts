@@ -29,3 +29,21 @@ test('a wrong identity or inaccessible moderator never proves membership',async(
     moderatorToken:async()=>{throw Error('inactive custom moderator')},
   }),/подтвердить участников/);
 });
+
+test('custom non-admin moderator falls back to shared moderator verified in the same group',async()=>{
+  const calls:Array<[string,number]>=[];
+  const token=await membershipReaderToken('community-a','-10042','100:cm',{
+    getMember:async(chat,user)=>{calls.push([chat,user]);return{status:user===300?'administrator':'member',user:{id:user,is_bot:true,first_name:'bot'}}},
+    moderatorToken:async()=> '200:custom',sharedModeratorToken:()=> '300:shared',
+  });
+  assert.equal(token,'300:shared');assert.deepEqual(calls,[['-10042',100],['-10042',200],['-10042',300]]);
+});
+
+test('shared fallback cannot bypass missing admin rights or a mismatched bot identity',async()=>{
+  for(const shared of [{status:'member',id:300},{status:'administrator',id:999}] as const){
+    await assert.rejects(membershipReaderToken('community-a','-10042','100:cm',{
+      getMember:async(_chat,user)=>({status:user===300?shared.status:'member',user:{id:user===300?shared.id:user,is_bot:true,first_name:'bot'}}),
+      moderatorToken:async()=> '200:custom',sharedModeratorToken:()=> '300:shared',
+    }),/подтвердить участников/);
+  }
+});

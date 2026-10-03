@@ -178,6 +178,14 @@ try{
  const resultsData=await (await fetch(base+manager.id+'/collaber',{headers})).json();
  assert.ok(resultsData.stats.sent>resultsData.stats.matched);assert.ok(resultsData.requests.every(r=>!['PREVIEW','DRAFT'].includes(r.status)));
  console.log('PASS private-only consent, silent empty group match, plain empty personal reply, feedback guard and meaningful owner statistics');
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id},data:{publicMentions:false}});
+ await queueLiveIntro(manager.id,{message_id:703,from:{id:59,first_name:'Олег'},text:'#intro Меня зовут Олег. Предлагаю продвижение мини-приложений.',date:Math.floor(Date.now()/1000)});
+ await processCollaberJobs();await processCollaberJobs();
+ const oleg=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'59'}}});
+ await processTelegramTask(task('59','cp:'+oleg.id+':public'));
+ assert.match(deliveries.at(-1).text,/Разрешение сохранено.*нет других участников/);
+ assert.equal(deliveries.at(-1).replyId,703);
+ console.log('PASS public consent explicitly explains that no other public profiles are available');
  noMatches=false;
  await profilePreference(manager.id,'42','forget');
  const removed=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});

@@ -76,7 +76,9 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
       return Boolean(current.count);
     });
     if(!accepted)return;
-    await deliverMessage(managerId,ctx.chatId,action==='public'?'Разрешение сохранено. Если найдётся подходящий человек, предложу знакомство ответом на твоё интро.':'Сохранено: профиль доступен только для личного подбора.',undefined,task.id,undefined,(consent.payload as any).sourceMessageId);
+    const others=action==='public'?await prisma.collaberProfile.count({where:{communityManagerId:managerId,tgUserId:{not:userId},searchable:true,publicMentions:true,forgotten:false,sourceAt:{not:null},membership:{not:'LEFT'}}}):0;
+    const confirmation=action==='public'?(others?'Разрешение сохранено. Если найдётся подходящий человек, предложу знакомство ответом на твоё интро.':'Разрешение сохранено. Пока в базе нет других участников, разрешивших публичный подбор. Для рекомендации нужны их интро и разрешение на показ в группе.'):'Сохранено: профиль доступен только для личного подбора.';
+    await deliverMessage(managerId,ctx.chatId,confirmation,undefined,task.id,undefined,(consent.payload as any).sourceMessageId);
     return;
   }
   if(p.callback){
