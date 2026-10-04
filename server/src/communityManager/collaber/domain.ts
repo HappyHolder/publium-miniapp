@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 
-export type IntroMessage = { id: string; userId: string; name: string; username: string|null; text: string; at: string };
-export type Fact = { kind:'project'|'skill'|'offer'|'need'; value:string; evidence:string; at:string; expiresAt:string|null; sourceMessageId?:string };
+export type IntroMessage = { id: string; userId: string; name: string; username: string|null; text: string; at: string; sourceChatId?:string };
+export type Fact = { kind:'project'|'skill'|'offer'|'need'; value:string; evidence:string; at:string; expiresAt:string|null; sourceMessageId?:string; sourceChatId?:string };
 export const hash = (s:string) => createHash('sha256').update(s).digest('hex');
 export const safeUsername = (v:unknown) => typeof v==='string' && /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(v.replace(/^@/,'')) ? v.replace(/^@/,'') : null;
 const flatten = (v:unknown):string => typeof v==='string'?v:Array.isArray(v)?v.map(x=>typeof x==='string'?x:x&&typeof x.text==='string'?x.text:'').join(''):'';
@@ -44,7 +44,7 @@ export function validateFacts(value:unknown, source:IntroMessage, freshnessDays:
     const evidence=f.evidence.trim(), val=f.value.trim();
     if(evidence.length<8||!source.text.includes(evidence)||!val)return[];
     // AI paraphrases cannot introduce unsupported profile facts: display the actual excerpt.
-    return [{kind:f.kind,value:evidence.slice(0,500),evidence,at:source.at,sourceMessageId:source.id,expiresAt:['offer','need'].includes(f.kind)?new Date(new Date(source.at).getTime()+freshnessDays*86400000).toISOString():null}];
+    return [{kind:f.kind,value:evidence.slice(0,500),evidence,at:source.at,sourceMessageId:source.id,...(source.sourceChatId?{sourceChatId:source.sourceChatId}:{}),expiresAt:['offer','need'].includes(f.kind)?new Date(new Date(source.at).getTime()+freshnessDays*86400000).toISOString():null}];
   });
 }
 export function factsOf(raw:unknown):Fact[]{return Array.isArray(raw)?raw.filter(f=>f&&typeof f.value==='string'&&typeof f.evidence==='string'&&['project','skill','offer','need'].includes(f.kind)) as Fact[]:[]}

@@ -6,6 +6,8 @@ import { parseArchive, validateFacts, activeFacts, factsOf, factNeedsConfirmatio
 import { entryPayload, parseEntry } from './collaber/telegram';
 import { matchPresentation } from './collaber/delivery';
 import { introQuery } from './collaber/proposals';
+import { introPassages, rankProfileEvidence, reviewedIds } from './collaber/matchingContext';
+import { appendIntroReferences, groupMessageLink } from './messageLinks';
 
 const message:IntroMessage={id:'17',userId:'42',name:'Анна',username:'annatest',text:'Меня зовут Анна. Разрабатываю приложение для изучения языков. Ищу партнёров для обмена аудиторией.',at:'2026-09-01T00:00:00.000Z'};
 test('relay intro is never attributed to the sender when export omits is_bot',()=>{
@@ -89,4 +91,39 @@ test('rich result keeps names, description and reason in separate paragraphs',()
 test('candidate facts distinguish useful offers from irrelevant words',()=>{
  const facts=validateFacts([{kind:'offer',value:'x',evidence:'Разрабатываю приложение для изучения языков.'}],message,90);
  assert.equal(rankFacts('разработка приложения для языков',facts).length,1);assert.equal(rankFacts('сварка металла',facts).length,0);
+});
+
+test('retrieval recovers project capabilities omitted by fact extraction',()=>{
+ const sourceText='Меня зовут Иван. Я художник.\n\nСоздал Example ID.\n\nExample ID предоставляет верификацию пользователей мини-приложений и защиту от ботов.';
+ const facts=validateFacts([{kind:'skill',value:'x',evidence:'Я художник.'}],{...message,text:sourceText},90);
+ assert.equal(rankFacts('верификация пользователей',facts).length,0);
+ const result=rankProfileEvidence('верификация пользователей',{facts,sourceText,sourceAt:new Date(message.at),sourceMessageId:17});
+ assert.ok(result.matches.length);assert.match(result.matches[0].fact.evidence,/верификацию пользователей/);
+ assert.ok(sourceText.includes(result.matches[0].fact.evidence));assert.equal(facts.length,1);
+ const long='Не относящийся к делу текст. '.repeat(200)+'\n\nСервис верификации пользователей.';
+ const passages=introPassages(long,'сервис верификации пользователей');
+ assert.ok(passages.join('\n').length<=2400);assert.ok(passages.some(p=>p.includes('Сервис верификации')));
+});
+
+test('model failure and invented candidate IDs cannot masquerade as no matches',()=>{
+ const allowed=new Set(['a','b']);
+ assert.deepEqual(reviewedIds({ids:[]},allowed),[]);
+ assert.deepEqual(reviewedIds({ids:['b','b','a']},allowed),['b','a']);
+ for(const result of [null,{ids:null},{ids:['invented']},{ids:[42]}])assert.throws(()=>reviewedIds(result,allowed),/корректный список/);
+});
+
+test('intro button opens a verified group source and otherwise keeps the profile fallback',()=>{
+ const c={id:'p',tgUserId:'42',name:'Анна',username:null,description:'Проект',reason:'Предложение',at:message.at};
+ const result=matchPresentation({id:'r',query:'партнёр',candidates:[{...c,introUrl:'https://t.me/c/123/17'},c]},DEFAULT_COLLABER);
+ const buttons=result.keyboard.inline_keyboard.flat().filter(b=>b.text.startsWith('Интро:'));
+ assert.deepEqual(buttons,[{text:'Интро: Анна',url:'https://t.me/c/123/17'},{text:'Интро: Анна',callback_data:'cb:i:r:1'}]);
+});
+
+test('conversational intro references use only actual cited group messages',()=>{
+ const source={reference:'msg:17',telegramMessageId:17,kind:'human',text:'#intro Я создал проект.'};
+ assert.equal(groupMessageLink('42',17),null);assert.equal(groupMessageLink('-100123',0),null);
+ assert.equal(appendIntroReferences('Обсудите интеграцию.',['msg:17'],[source],'-100123',18),'Обсудите интеграцию.\n\nИнтро: https://t.me/c/123/17');
+ assert.equal(appendIntroReferences('Привет!',['msg:17'],[source],'-100123',17),'Привет!');
+ assert.equal(appendIntroReferences('Ответ',['msg:999'],[source],'-100123',18),'Ответ');
+ assert.equal(appendIntroReferences('Ответ',['msg:17'],[source],'42',18),'Ответ');
 });

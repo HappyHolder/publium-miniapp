@@ -13,6 +13,7 @@ import { normalizeCommunityManagerPunctuation } from './conversationStyle';
 import { openCommunityManagerSession } from './agentSession';
 import { relevantExpert } from './participantMemory';
 import { createMatch } from './collaber/service';
+import { appendIntroReferences } from './messageLinks';
 
 export const COMMUNITY_AGENT_VERSION='community-agent-v1';
 
@@ -236,6 +237,7 @@ function normalizeDecision(raw:CommunityAgentDecision,ctx:CommunityAgentContext)
   const references=raw.references.filter(reference=>ctx.allowedReferences.has(reference));
   const targetAllowed=raw.targetMessageId==null||ctx.snapshot.thread.messages.some(item=>item.telegramMessageId===raw.targetMessageId)||raw.targetMessageId===ctx.event.replyTargetMessageId||raw.targetMessageId===ctx.event.currentTelegramMessageId;
   let action=raw.action,message=raw.message?plain(raw.message):null,reaction=raw.reaction?.trim()||null,poll=raw.poll;
+  if(message&&ctx.event.kind==='HUMAN_MESSAGE')message=appendIntroReferences(message,references,[...ctx.snapshot.thread.messages,...ctx.snapshot.relatedBranches.flatMap(b=>b.messages)],ctx.chatId,ctx.event.currentTelegramMessageId);
   const allowedActions:Record<CommunityAgentEvent['kind'],Set<CommunityAgentDecision['action']>>={
     HUMAN_MESSAGE:new Set(['no_action','react','reply','comment']),
     CONTENT_POST:new Set(['no_action','comment']),

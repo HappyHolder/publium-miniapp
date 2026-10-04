@@ -194,6 +194,41 @@ try{
  assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).status,'CANCELLED');
  console.log('PASS erasure invalidates derived recommendations and prevents re-import resurrection');
 
+ // Missing extraction evidence must reach semantic review, without real AI/network calls.
+ const originalInference=ai.collaberJson,originalMembership=telegram.getChatMember;
+ const provider={...intro,id:'810',userId:'810',name:'Fixture Provider',text:'#intro Я художник. Создал Example ID.\n\nExample ID предоставляет верификацию пользователей мини-приложений и защиту от ботов.',at:new Date().toISOString(),sourceChatId:chat.tgChatId};
+ ai.collaberJson=async(_manager,stage,{prompt,system})=>{
+   const p=JSON.parse(prompt);
+   if(system.startsWith('Extract'))return {facts:[{kind:'project',value:'Создал Example ID.',evidence:'Создал Example ID.'}]};
+   if(system.startsWith('Given'))return {keywords:['верификация','пользователи']};
+   if(system.startsWith('Rank')){
+     const candidate=p.candidates.find(c=>c.intro.join(' ').includes('Example ID предоставляет верификацию'));
+     assert.ok(candidate,'original project capabilities must reach semantic review');
+     assert.ok(!candidate.facts.some(f=>f.text.includes('верификацию')),'fixture extraction intentionally omits the capability');
+     return {ids:[candidate.id]};
+   }
+ };
+ await ingestIntro(manager.id,provider,config.features.collaber,false,true);
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'810'},data:{publicMentions:true}});
+ const verification=await findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,false);
+ assert.equal(verification.length,1);assert.equal(verification[0].tgUserId,'810');assert.match(verification[0].evidence,/верификацию/);
+ assert.equal(verification[0].introUrl,'https://t.me/c/'+chat.tgChatId.slice(4)+'/810');
+ const beforeDiagnostic=sends;
+ telegram.getChatMember=async(chat,user,token)=>{if(Number(user)!==100&&Number(user)!==200)throw new Error('Simulated membership read failure');return originalMembership(chat,user,token)};
+ await assert.rejects(findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,true),/проверить участие/);
+ assert.equal(sends,beforeDiagnostic);
+ const diagnostic=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber_matching'},orderBy:{createdAt:'desc'}});
+ assert.equal(diagnostic.status,'FAILED');assert.equal(diagnostic.metadata.unverified,1);assert.equal(diagnostic.metadata.semantic,1);
+ telegram.getChatMember=originalMembership;
+ // Private edits do not inherit a group source, even if Telegram IDs collide.
+ await ingestIntro(manager.id,{...provider,id:'811',at:new Date(Date.now()+1000).toISOString(),sourceChatId:undefined},config.features.collaber,true,false);
+ const privateResult=await findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,false);
+ assert.equal(privateResult[0].introUrl,undefined);
+ ai.collaberJson=async(_manager,_stage,{system})=>system.startsWith('Given')?{keywords:['верификация']}:null;
+ await assert.rejects(findCandidates(manager.id,'верификация пользователей','811',config.features.collaber,true,false),/корректный список/);
+ ai.collaberJson=originalInference;
+ console.log('PASS omitted project capability reaches semantic review; verified intro links, private edit isolation, model/membership failures are not NO_MATCH');
+
  await prisma.communityManager.update({where:{id:manager.id},data:{enabled:false}});
  await assert.rejects(createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'paused-'+tag}),/выключен/);
  const beforePrivacy=sends;telegram.getChatMember=async()=>({status:'left',user:{id:44}});
