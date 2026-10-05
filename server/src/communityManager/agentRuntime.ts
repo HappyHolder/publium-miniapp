@@ -12,7 +12,6 @@ import { channelAboutContext, personalityPrompt } from './personality';
 import { normalizeCommunityManagerPunctuation } from './conversationStyle';
 import { openCommunityManagerSession } from './agentSession';
 import { relevantExpert } from './participantMemory';
-import { createMatch } from './collaber/service';
 import { appendIntroReferences } from './messageLinks';
 
 export const COMMUNITY_AGENT_VERSION='community-agent-v1';
@@ -156,19 +155,6 @@ async function loadSnapshot(managerId:string,config:CommunityManagerConfigData,e
     channelAbout:config.support.useBrandKit?channelAboutContext(manager?.community.chat?.style??manager?.community.channel?.brandKit):'',
   };
 }
-const collaberTool=tool({
-  name:'find_collaboration_partners',
-  description:'Find evidence-backed people for a professional collaboration when the current user asks the community manager. Ask for the task first if it is unclear. Never use for unrelated conversation.',
-  parameters:z.object({query:z.string().min(4).max(500)}),
-  execute:async({query},runContext)=>{
-    const ctx=(runContext as RunContext<CommunityAgentContext>).context;
-    if(!ctx.config.features.collaber.enabled||!ctx.config.features.collaber.onDemand||!ctx.event.currentAuthorId||!ctx.event.addressedToManager||ctx.event.addressedToOtherHuman)return 'Collaber unavailable for this event.';
-    const request=await createMatch({managerId:ctx.managerId,userId:ctx.event.currentAuthorId,chatId:ctx.chatId,query,dedupeKey:'agent-match:'+ctx.event.dedupeKey,sourceMessageId:ctx.event.currentTelegramMessageId});
-    ctx.collaberRequestId=request.id;
-    return json({candidates:request.candidates,instruction:'The application will render the recommendations with contact buttons. Do not invent additional candidates or facts.'});
-  },
-});
-
 const readThreadTool=tool({
   name:'read_current_thread',
   description:'Read the exact current Telegram thread. Use it before making factual claims about what people or the source post said.',
@@ -306,7 +292,9 @@ export async function runCommunityManagerAgent(input:{
     event=await prisma.communityManagerAgentEvent.findUniqueOrThrow({where:{id:existing.id}});
   }
   try{
-    const agent=new Agent({name:'Community Manager',instructions,model:primaryTextModel(),modelSettings:{store:false,maxTokens:1800,reasoning:{effort:'low'},text:{verbosity:'low'}},tools:[...(input.config.features.collaber.enabled?[collaberTool]:[]),readThreadTool,readRelatedBranchesTool,recallParticipantsTool,projectKnowledgeTool,webResearchTool],outputType:CommunityAgentDecisionSchema});
+    // Group collaboration requests have already passed the dedicated router in engine.ts.
+    // Do not let a later conversational decision bypass that route or repeat its search.
+    const agent=new Agent({name:'Community Manager',instructions,model:primaryTextModel(),modelSettings:{store:false,maxTokens:1800,reasoning:{effort:'low'},text:{verbosity:'low'}},tools:[readThreadTool,readRelatedBranchesTool,recallParticipantsTool,projectKnowledgeTool,webResearchTool],outputType:CommunityAgentDecisionSchema});
     const result=await run(agent,eventInput(context),{context,maxTurns:5});
     if(!result.finalOutput)throw new Error('CM_AGENT_EMPTY');
     const decision=normalizeDecision(result.finalOutput,context),usage=result.state.usage;

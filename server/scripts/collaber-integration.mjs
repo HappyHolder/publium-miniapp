@@ -229,6 +229,44 @@ try{
  ai.collaberJson=originalInference;
  console.log('PASS omitted project capability reaches semantic review; verified intro links, private edit isolation, model/membership failures are not NO_MATCH');
 
+ const {handleGroupCollaborationQuery}=require('../dist/communityManager/collaber/routing.js');
+ await prisma.communityManager.update({where:{id:manager.id},data:{mode:'AUTOPILOT'}});
+ // Test the whole public handler with fake inference/Telegram, not just a keyword helper.
+ let routes=0;
+ ai.collaberJson=async(_manager,stage,{prompt,system})=>{
+   const p=JSON.parse(prompt);
+   if(stage==='Маршрут запроса Collaber'){
+     routes++;
+     if(p.text==='Привет!')return {kind:'NONE',query:''};
+     if(p.text==='Найди партнёра')return {kind:'CLARIFY',query:''};
+     if(p.text==='Для верификации')assert.equal(p.clarificationContext,'Найди партнёра');
+     return {kind:'SEARCH',query:'Сервис верификации пользователей'};
+   }
+   if(system.startsWith('Given'))return {keywords:['верификация','пользователи']};
+   if(system.startsWith('Rank'))return {ids:p.candidates.filter(c=>c.intro.join(' ').includes('Example ID предоставляет')).map(c=>c.id)};
+   return originalInference(_manager,stage,{prompt,system});
+ };
+ await ingestIntro(manager.id,{...provider,id:'812',at:new Date(Date.now()+2000).toISOString()},config.features.collaber,false,true);
+ const groupInput={managerId:manager.id,chatId:chat.tgChatId,userId:'811',messageId:820,eventKey:'route-test-'+tag,text:'Есть какие то проекты с проверкой человечности?',addressedToManager:true,addressedToOtherHuman:false};
+ const beforeRouting=sends;
+ assert.equal(await handleGroupCollaborationQuery(groupInput),true);
+ assert.equal(sends,beforeRouting+1);assert.equal(routes,1);
+ const routed=deliveries.at(-1);assert.equal(routed.replyId,820);assert.ok(routed.html.includes('cover.png'));
+ assert.ok(routed.keyboard.inline_keyboard.flat().some(b=>b.url==='https://t.me/c/'+chat.tgChatId.slice(4)+'/812'));
+ assert.ok(routed.keyboard.inline_keyboard.flat().some(b=>b.text.startsWith('Написать')));
+ await handleGroupCollaborationQuery(groupInput);assert.equal(sends,beforeRouting+1);assert.equal(routes,1);
+ assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'human-'+tag,addressedToOtherHuman:true}),false);assert.equal(routes,1);
+ assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'hello-'+tag,text:'Привет!'}),false);assert.equal(sends,beforeRouting+1);
+ assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'clarify-'+tag,text:'Найди партнёра',messageId:821}),true);
+ assert.match(deliveries.at(-1).text,/Для какой задачи/);
+ const clarificationAction=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber',status:'COMPLETED'},orderBy:{createdAt:'desc'}});
+ assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'followup-'+tag,text:'Для верификации',messageId:822,replyToMessageId:clarificationAction.telegramMessageId}),true);
+ assert.ok(deliveries.at(-1).html.includes('cover.png'));
+ await handleGroupCollaborationQuery({...groupInput,eventKey:'self-'+tag,userId:'810',messageId:823});
+ assert.ok(!deliveries.at(-1).html.includes('cover.png'),'requester must not recommend themselves');
+ ai.collaberJson=originalInference;
+ console.log('PASS natural group search renders one card with verified intro link; deduplication, normal chat, human reply exclusion, clarification follow-up and self exclusion');
+
  await prisma.communityManager.update({where:{id:manager.id},data:{enabled:false}});
  await assert.rejects(createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'paused-'+tag}),/выключен/);
  const beforePrivacy=sends;telegram.getChatMember=async()=>({status:'left',user:{id:44}});

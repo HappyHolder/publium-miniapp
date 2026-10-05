@@ -4,6 +4,7 @@ import { queueLiveIntro } from './collaber/service';
 import { preferenceCommand } from './collaber/domain';
 import { processCollaberJobs } from './collaber/worker';
 import { deliverMatch } from './collaber/delivery';
+import { handleGroupCollaborationQuery } from './collaber/routing';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -176,6 +177,9 @@ async function processJob(job:any){
   const personal=evolvePersonalState(priorState?.internalState,ctx.config,{direct:addressedToManager,question:/[?？]\s*$/.test(text),conflict:/(?:дурак|идиот|тупой|заткнись|fuck|stupid)/iu.test(text)});
   await prisma.communityManagerConversationState.update({where:{communityManagerId:ctx.manager.id},data:{internalState:{personal} as any,lastAnalyzedAt:new Date(),messagesSinceAnalysis:0}});
   try{
+    if(m.tgUserId&&await handleGroupCollaborationQuery({managerId:ctx.manager.id,chatId:m.tgChatId,userId:m.tgUserId,messageId:m.telegramMessageId,eventKey:m.id,text,addressedToManager,addressedToOtherHuman,replyToMessageId:m.replyToMessageId??undefined})){
+      await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'PROCESSED'}});await done(job.id,'COMPLETED');return;
+    }
     const result=await runCommunityManagerAgent({managerId:ctx.manager.id,communityId:ctx.community.id,channelId:ctx.community.channelId,channelName:contextName(ctx.community),chatId:m.tgChatId,config:ctx.config,sessionKey:conversationSessionKey(location.threadId,location.segmentId),threadId:location.threadId,segmentId:location.segmentId,event:{kind:'HUMAN_MESSAGE',dedupeKey:'human:'+ctx.manager.id+':'+m.id,sourceMessageId:m.id,currentText:text,currentTelegramMessageId:m.telegramMessageId,currentAuthorId:m.tgUserId??undefined,currentAuthor:participantLabel(participant),replyTarget:replyTarget??undefined,replyTargetMessageId:m.replyToMessageId??undefined,addressedToManager,addressedToOtherHuman}});
     if(result.collaberRequestId){await deliverMatch(result.collaberRequestId,ctx.manager.id);await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'PROCESSED'}});await done(job.id,'COMPLETED');return}
     const decision=result.decision,humanQuestion=/[?？]\s*$/.test(text),unansweredQuestion=decision.action==='no_action'&&humanQuestion,nextLocation=await applyConversationAnalysis(ctx.manager.id,m.id,location,{topicKey:decision.topicKey||'conversation',sameSegment:decision.sameConversation,expectsReply:unansweredQuestion,conversationComplete:unansweredQuestion?false:decision.conversationComplete,newContribution:text,speechAct:humanQuestion?'question':'other',possibleClaims:decision.memoryUpdates.map(item=>({kind:item.kind,value:item.value,confidence:item.confidence}))},m.createdAt);
