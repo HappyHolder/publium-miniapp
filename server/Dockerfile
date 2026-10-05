@@ -29,7 +29,11 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node assets ./assets
 COPY --chown=node:node scripts ./scripts
 RUN mkdir -p /data/uploads \
- && chown -R node:node /app /data/uploads /ms-playwright
+ && chown node:node /app /data/uploads
+
+# Dependencies and browser binaries are read-only at runtime. Recursively chowning
+# them here duplicated ~1.5 GB into a new layer on every source-code release.
+# Application files above already use COPY --chown; only writable roots need ownership.
 
 USER node
 EXPOSE 8787
