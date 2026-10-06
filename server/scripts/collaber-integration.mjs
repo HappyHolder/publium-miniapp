@@ -30,9 +30,10 @@ ai.collaberJson=async(managerId,stage,{prompt,system})=>{
  const p=JSON.parse(prompt);
  if(system.startsWith('Extract'))return {facts:[{kind:'offer',value:p.message,evidence:p.message}],closedNeedsEvidence:null};
  if(system.startsWith('Given'))return{keywords:['маркетинг','продвижение']};
- if(system.startsWith('Rank'))return{ids:noMatches?[]:p.candidates.slice(0,3).map(x=>x.id)};
+ if(system.startsWith('Rank'))return fixtureReview(p,noMatches?[]:p.candidates.slice(0,3).map(x=>x.id));
  throw new Error('Unexpected inference');
 };
+function fixtureReview(p,ids){return {decisions:p.candidates.map(c=>({id:c.id,role:'provider',fit:ids.includes(c.id)?'direct':'none',reasonCode:ids.includes(c.id)?'relevant_capability':'unrelated',evidence:ids.includes(c.id)?(c.intro.find(t=>t.includes('Example ID предоставляет'))??c.facts[0]?.text??c.intro[0]):''}))}}
 const tag=randomUUID();let user,community,other,moderatorChat,httpServer;
 try{
  user=await prisma.user.create({data:{telegramId:String(Date.now()),subscription:{create:{tier:'STARTER',expiresAt:new Date(Date.now()+86400000),quotaResetAt:new Date(Date.now()+86400000)}}}});
@@ -63,10 +64,29 @@ try{
  console.log('PASS all-time matching retains historical offers with explicit confirmation and respects opt-out');
 
  const request=await createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'match-'+tag});
+ const beforeDeliveryInference=ai.collaberJson;
+ ai.collaberJson=async()=>{throw new Error('Delivery must not rerun inference')};
  await Promise.all([deliverMatch(request.id,manager.id),deliverMatch(request.id,manager.id)]);
+ ai.collaberJson=beforeDeliveryInference;
  assert.equal(sends,1);assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).status,'SENT');
  assert.equal((await prisma.subscription.findUnique({where:{userId:user.id}})).communityManagerActionsUsed,1);
  console.log('PASS concurrent delivery is claimed once and charged once');
+ const hiddenRequest=await createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'hidden-'+tag,initiative:true});
+ const {refreshCandidates}=require('../dist/communityManager/collaber/service.js');
+ await profilePreference(manager.id,'42','no_mentions');
+ assert.equal((await refreshCandidates(manager.id,'43',hiddenRequest.candidates,true)).length,0);
+ await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'42'},data:{publicMentions:true}});
+ const changed=await prisma.collaberProfile.findFirst({where:{communityManagerId:manager.id,tgUserId:'42'}});
+ await prisma.collaberProfile.update({where:{id:changed.id},data:{sourceText:changed.sourceText+' Обновление.'}});
+ assert.equal((await refreshCandidates(manager.id,'43',hiddenRequest.candidates,true)).length,0);
+ await prisma.collaberProfile.update({where:{id:changed.id},data:{sourceText:changed.sourceText}});
+ const membershipBefore=telegram.getChatMember;
+ telegram.getChatMember=async(chat,id,token)=>Number(id)===42?{status:'left',user:{id:42}}:membershipBefore(chat,id,token);
+ assert.equal((await refreshCandidates(manager.id,'43',hiddenRequest.candidates,true)).length,0);
+ telegram.getChatMember=membershipBefore;
+ await prisma.collaberProfile.update({where:{id:changed.id},data:{membership:'MEMBER'}});
+ console.log('PASS delivery uses saved selection without AI; consent revocation, changed intro and departed member remove stale candidates');
+
 
  ambiguous=true;
  const uncertain=await createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'uncertain-'+tag});
@@ -200,19 +220,21 @@ try{
  ai.collaberJson=async(_manager,stage,{prompt,system})=>{
    const p=JSON.parse(prompt);
    if(system.startsWith('Extract'))return {facts:[{kind:'project',value:'Создал Example ID.',evidence:'Создал Example ID.'}]};
-   if(system.startsWith('Given'))return {keywords:['верификация','пользователи']};
+   if(system.startsWith('Given'))return {keywords:['мореплавание']}; // Deliberately poor synonyms must not prune a small community.
    if(system.startsWith('Rank')){
      const candidate=p.candidates.find(c=>c.intro.join(' ').includes('Example ID предоставляет верификацию'));
      assert.ok(candidate,'original project capabilities must reach semantic review');
      assert.ok(!candidate.facts.some(f=>f.text.includes('верификацию')),'fixture extraction intentionally omits the capability');
-     return {ids:[candidate.id]};
+     return fixtureReview(p,[candidate.id]);
    }
  };
  await ingestIntro(manager.id,provider,config.features.collaber,false,true);
  await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'810'},data:{publicMentions:true}});
- const verification=await findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,false);
+ const verification=await findCandidates(manager.id,'Есть проекты с проверкой человечности?','811',config.features.collaber,true,false);
  assert.equal(verification.length,1);assert.equal(verification[0].tgUserId,'810');assert.match(verification[0].evidence,/верификацию/);
  assert.equal(verification[0].introUrl,'https://t.me/c/'+chat.tgChatId.slice(4)+'/810');
+ const reviewLog=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber_matching'},orderBy:{createdAt:'desc'}});
+ assert.ok(reviewLog.metadata.decisions.some(d=>d.id===verification[0].id&&d.role==='provider'&&d.fit==='direct'&&d.returned));
  const beforeDiagnostic=sends;
  telegram.getChatMember=async(chat,user,token)=>{if(Number(user)!==100&&Number(user)!==200)throw new Error('Simulated membership read failure');return originalMembership(chat,user,token)};
  await assert.rejects(findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,true),/проверить участие/);
@@ -243,7 +265,7 @@ try{
      return {kind:'SEARCH',query:'Сервис верификации пользователей'};
    }
    if(system.startsWith('Given'))return {keywords:['верификация','пользователи']};
-   if(system.startsWith('Rank'))return {ids:p.candidates.filter(c=>c.intro.join(' ').includes('Example ID предоставляет')).map(c=>c.id)};
+   if(system.startsWith('Rank'))return fixtureReview(p,p.candidates.filter(c=>c.intro.join(' ').includes('Example ID предоставляет')).map(c=>c.id));
    return originalInference(_manager,stage,{prompt,system});
  };
  await ingestIntro(manager.id,{...provider,id:'812',at:new Date(Date.now()+2000).toISOString()},config.features.collaber,false,true);

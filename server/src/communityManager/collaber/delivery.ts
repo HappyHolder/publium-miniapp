@@ -5,7 +5,7 @@ import { blocksToRichHtml, type PostBlock } from '../../lib/richPost';
 import { reserveSubscriptionQuota, refundSubscriptionQuota } from '../../lib/subscriptionLimits';
 import { communityManagerExecutor } from '../managedBot';
 import { isQuietHour } from '../config';
-import { collaberContext, findCandidates, type Candidate } from './service';
+import { collaberContext, refreshCandidates, profileRevision, type Candidate } from './service';
 import { contactUrl } from './domain';
 import { memberAccess } from './telegram';
 import type { CollaberConfig } from './config';
@@ -91,7 +91,7 @@ export async function deliverMatch(requestId:string,managerId:string,approved=fa
     if(state?.pendingModeratorAt&&state.pendingModeratorAt>new Date(Date.now()-30*60000))return;
     const activity=await prisma.communityManagerActivity.findFirst({where:{communityManagerId:managerId,status:{in:['PROCESSING','RUNNING','SENDING','ACTIVE']}}});if(activity)return;
   }else if(!cfg.onDemand)return;
-  const candidates=await findCandidates(managerId,request.query,request.tgUserId,cfg,request.chatId.startsWith('-'));
+  const candidates=await refreshCandidates(managerId,request.tgUserId,request.candidates,request.chatId.startsWith('-'));
   if(request.initiative&&!candidates.length){await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'NO_MATCH',candidates:[]}});return}
   const claim=await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'SENDING',candidates:candidates as any}});if(!claim.count)return;
   const presentation=matchPresentation({...request,candidates},cfg,candidates.length?undefined:await emptyMatchText(managerId,request.tgUserId,request.chatId.startsWith('-')));
@@ -99,8 +99,8 @@ export async function deliverMatch(requestId:string,managerId:string,approved=fa
     const ref=await deliverMessage(managerId,request.chatId,presentation.text,presentation.keyboard,request.id,presentation.html,request.sourceMessageId??undefined,request.initiative,async()=>{
       await memberAccess(managerId,request.tgUserId);
       const current=await prisma.collaberRequest.findUnique({where:{id:request.id}});
-      const eligible=await prisma.collaberProfile.count({where:{communityManagerId:managerId,id:{in:candidates.map(c=>c.id)},searchable:true,forgotten:false,...(request.chatId.startsWith('-')?{publicMentions:true}:{})}});
-      if(current?.status!=='SENDING'||eligible!==candidates.length)throw new Error('Состав или видимость участников изменились. Повторите подбор.');
+      const eligible=await prisma.collaberProfile.findMany({where:{communityManagerId:managerId,id:{in:candidates.map(c=>c.id)},searchable:true,forgotten:false,...(request.chatId.startsWith('-')?{publicMentions:true}:{})}});
+      if(current?.status!=='SENDING'||eligible.length!==candidates.length||candidates.some(c=>!eligible.some(p=>p.id===c.id&&profileRevision(p)===c.profileRevision)))throw new Error('Состав или видимость участников изменились. Повторите подбор.');
       if(request.initiative&&!await prisma.collaberProfile.findFirst({where:{communityManagerId:managerId,tgUserId:request.tgUserId,searchable:true,publicMentions:true,forgotten:false}}))throw new Error('Участник отозвал согласие на рекомендации');
     });
     await prisma.collaberRequest.update({where:{id:requestId},data:{status:'SENT',telegramMessageId:ref.messageId,response:presentation.text}});
