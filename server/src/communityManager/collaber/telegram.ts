@@ -39,6 +39,24 @@ export async function acceptCollaberUpdate(update:any,executor:{type:'SHARED'|'C
   if(!managerId)return Boolean(/^(cb|cp|cm):/.test(callback?.data??'')||m?.text?.startsWith('/start co_'));
   const ctx=await collaberContext(managerId);if(!ctx||ctx.manager.executorType!==executor.type||executor.communityId&&ctx.manager.communityId!==executor.communityId)return true;
   const currentExecutor=await communityManagerExecutor(ctx.manager.communityId);if(currentExecutor.botId!==executor.botId)return true;
+  if(callback?.data?.startsWith('cb:n:')){
+    const [, ,requestId,index]=String(callback.data).split(':');
+    const alert=(text:string)=>telegramAction('answerCallbackQuery',{callback_query_id:callback.id,text,show_alert:true},currentExecutor.token);
+    const request=await prisma.collaberRequest.findFirst({where:{id:requestId,communityManagerId:managerId,status:'SENT',createdAt:{gt:new Date(Date.now()-7*86400000)}}});
+    if(!ctx.manager.enabled||!ctx.config.features.collaber.enabled){await alert('Collaber сейчас на паузе.');return true}
+    if(!request){await alert('Этот подбор уже недоступен. Сделай новый запрос.');return true}
+    if(!canAct(request.tgUserId,userId)){await alert('Эта кнопка для автора подбора. Сделай свой запрос к боту.');return true}
+    if(String(callback.message?.chat?.id)!==request.chatId)return true;
+    const candidate=Array.isArray(request.candidates)?(request.candidates as unknown as Candidate[])[Number(index)]:null;
+    const profile=candidate&&await prisma.collaberProfile.findFirst({where:{id:candidate.id,communityManagerId:managerId,searchable:true,forgotten:false,...(request.chatId.startsWith('-')?{publicMentions:true}:{})}});
+    if(!profile){await alert('Участник больше недоступен для этого подбора.');return true}
+    const sessions=await prisma.collaberSession.findMany({where:{communityManagerId:managerId,botId:String(executor.botId),tgUserId:{in:[userId,profile.tgUserId]},expiresAt:{gt:new Date()}}});
+    if(!sessions.some(s=>s.tgUserId===userId)){
+      await telegramAction('answerCallbackQuery',{callback_query_id:callback.id,url:'https://t.me/'+currentExecutor.username+'?start='+entryPayload(managerId)},currentExecutor.token);
+      return true;
+    }
+    if(!sessions.some(s=>s.tgUserId===profile.tgUserId)){await alert('Участник ещё не подключил личные приглашения. Пока можно связаться через кнопку «Написать».');return true}
+  }
   if(callback)await answerBotCallback(callback.id,'Проверяю…',currentExecutor.token).catch(()=>undefined);
   await enqueueCollaber(managerId,'TELEGRAM','telegram:'+executor.botId+':'+update.update_id,{userId,botId:String(executor.botId),text:String(m?.text??'').slice(0,12000),name:[m?.from?.first_name,m?.from?.last_name].filter(Boolean).join(' '),username:m?.from?.username??null,messageId:m?.message_id??null,callback:callback?{data:String(callback.data),chatId:String(callback.message?.chat?.id??'')}:null});
   return true;
@@ -109,7 +127,7 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     const request=await prisma.collaberRequest.findFirst({where:{id,communityManagerId:managerId,status:'SENT',createdAt:{gt:new Date(Date.now()-7*86400000)}}});
     if(!request||!canAct(request.tgUserId,userId))return;
     const replyChat=request.chatId; // Never assume a group user has started a private conversation.
-    const respond=(text:string,keyboard?:any)=>deliverMessage(managerId,replyChat,text,keyboard,task.id,undefined,request.telegramMessageId??undefined);
+    const respond=(text:string,keyboard?:any)=>kind==='n'?say(text,keyboard):deliverMessage(managerId,replyChat,text,keyboard,task.id,undefined,request.telegramMessageId??undefined);
     if(kind==='f'||kind==='good'){if(!Array.isArray(request.candidates)||!request.candidates.length)return;await prisma.collaberRequest.update({where:{id},data:{feedback:kind==='good'?'USEFUL':'NOT_USEFUL'}});await respond(kind==='good'?'Спасибо, отметил полезный подбор. Это ещё не означает, что знакомство состоялось.':'Отметил: подбор не подошёл. Уточни задачу, чтобы я изменил поиск.');return}
     if(kind==='r'){await respond('Напиши, что изменить: нужные навыки, тематику или формат сотрудничества. Можно продолжить в личном диалоге.',{inline_keyboard:[[{text:'Уточнить в личном диалоге',url:'https://t.me/'+ctx.executor.username+'?start='+entryPayload(managerId)}]]});return}
     const candidate=(request.candidates as unknown as Candidate[])[Number(index)];if(!candidate)return;
@@ -128,7 +146,7 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     }
     if(kind==='n'){
       const sessions=await prisma.collaberSession.findMany({where:{communityManagerId:managerId,botId:p.botId,tgUserId:{in:[userId,profile.tgUserId]},expiresAt:{gt:new Date()}}});
-      if(!sessions.some(s=>s.tgUserId===userId)){await respond('Для знакомства сначала открой личный диалог с ботом, затем нажми «Познакомить» ещё раз.',{inline_keyboard:[[{text:'Открыть бота',url:'https://t.me/'+ctx.executor.username+'?start='+entryPayload(managerId)}]]});return}
+      if(!sessions.some(s=>s.tgUserId===userId))return; // Webhook opens private onboarding; never post this prerequisite to the group.
       if(!sessions.some(s=>s.tgUserId===profile.tgUserId)){await respond('Участник пока не подключил личные приглашения. Можно воспользоваться его публичным контактом, если он указан.');return}
       const pairKey=[userId,profile.tgUserId].sort().join(':');
       const previous=await prisma.collaberInvite.findUnique({where:{communityManagerId_pairKey:{communityManagerId:managerId,pairKey}}});
