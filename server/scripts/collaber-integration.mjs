@@ -18,10 +18,10 @@ const express=require('express');
 const originalFetch=globalThis.fetch;
 globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
 env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
-let sends=0,ambiguous=false,noMatches=false,failEdit=false;const deliveries=[],edits=[],markupEdits=[],callbackAnswers=[];
+let sends=0,ambiguous=false,noMatches=false,failDelete=false,alreadyDeleted=false;const deliveries=[],deletions=[],markupEdits=[],callbackAnswers=[];
 telegram.telegramAction=async(method,payload)=>{if(method==='answerCallbackQuery'){callbackAnswers.push(payload);return}assert.equal(method,'editMessageReplyMarkup');markupEdits.push(payload)};
 telegram.answerBotCallback=async(id,text)=>{callbackAnswers.push({callback_query_id:id,text})};
-telegram.editChannelPost=async params=>{if(failEdit)throw new Error('Simulated edit failure');edits.push(params)};
+telegram.deleteBotMessage=async(chatId,messageId)=>{if(failDelete)throw new Error('Simulated delete failure');if(alreadyDeleted)throw new telegram.TelegramApiError('Bad Request: message to delete not found',400);deletions.push({chatId,messageId})};
 env.MODERATOR_BOT_TOKEN='200:moderator-test';
 telegram.getChatMember=async(chat,user,token)=>{
  if(token==='100:test'&&Number(user)!==100)throw new Error('Non-admin CM must not verify other users');
@@ -171,9 +171,14 @@ try{
  const publicButton=prompt.keyboard.inline_keyboard[0][0].callback_data;
  const beforeStranger=sends;await processTelegramTask(task('99',publicButton));assert.equal(sends,beforeStranger);
  assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,false);
- const beforeConsent=sends;failEdit=true;await assert.rejects(processTelegramTask(task('56',publicButton)),/edit failure/);failEdit=false;
- await processTelegramTask(task('56',publicButton));const afterPublic=sends;assert.equal(sends,beforeConsent);assert.match(edits.at(-1).text,/Показ в группе разрешён/);assert.deepEqual(edits.at(-1).replyMarkup,{inline_keyboard:[]});
- const editCount=edits.length;await processTelegramTask(task('56',publicButton));assert.equal(sends,afterPublic);assert.equal(edits.length,editCount);
+ const beforeConsent=sends;failDelete=true;await assert.rejects(processTelegramTask(task('56',publicButton)),/delete failure/);failDelete=false;
+ assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,true,'choice survives deletion failure');
+ await processTelegramTask(task('56',publicButton));const afterPublic=sends;assert.equal(sends,beforeConsent);
+ const consentPromptTask=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+manager.id+':56'}});
+ const promptTask=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent-prompt:'+consentPromptTask.id}});
+ const promptAction=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,metadata:{path:['collaberKey'],equals:promptTask.id}}});
+ assert.deepEqual(deletions.at(-1),{chatId:chat.tgChatId,messageId:promptAction.telegramMessageId});assert.notEqual(deletions.at(-1).messageId,700);
+ const deleteCount=deletions.length;await processTelegramTask(task('56',publicButton));assert.equal(sends,afterPublic);assert.equal(deletions.length,deleteCount);
  assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,true);
  console.log('PASS live group intro saves profile; author-only public consent works without starting a private bot session');
 
@@ -198,7 +203,8 @@ try{
  await queueLiveIntro(manager.id,{message_id:701,from:{id:57,first_name:'Вера'},text:'#intro Меня зовут Вера. Предлагаю маркетинг для мини-приложений.',date:Math.floor(Date.now()/1000)});
  await processCollaberJobs();await processCollaberJobs();
  const vera=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'57'}}});
- await processTelegramTask(task('57','cp:'+vera.id+':private'));const beforePrivate=sends;
+ const beforePrivateDelete=deletions.length;await processTelegramTask(task('57','cp:'+vera.id+':private'));const beforePrivate=sends;
+ assert.equal(deletions.length,beforePrivateDelete+1);
  await processCollaberJobs();assert.equal(sends,beforePrivate);
  assert.equal((await prisma.collaberProfile.findUnique({where:{id:vera.id}})).publicMentions,false);
  assert.equal(await prisma.collaberRequest.count({where:{communityManagerId:manager.id,tgUserId:'57',initiative:true}}),0);
@@ -220,10 +226,10 @@ try{
  await queueLiveIntro(manager.id,{message_id:703,from:{id:59,first_name:'Олег'},text:'#intro Меня зовут Олег. Предлагаю продвижение мини-приложений.',date:Math.floor(Date.now()/1000)});
  await processCollaberJobs();await processCollaberJobs();
  const oleg=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'59'}}});
- await processTelegramTask(task('59','cp:'+oleg.id+':public'));
- assert.match(edits.at(-1).text,/Показ в группе разрешён/);
- assert.equal(edits.at(-1).chatId,chat.tgChatId);
- console.log('PASS consent updates the original prompt instead of adding confirmation messages');
+ alreadyDeleted=true;await processTelegramTask(task('59','cp:'+oleg.id+':public'));alreadyDeleted=false;
+ const olegConsent=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+manager.id+':59'}});
+ assert.equal(olegConsent.payload.removed,true);
+ console.log('PASS consent deletes only its prompt; both choices, deletion retry and already-deleted messages preserve consent without new messages');
  noMatches=false;
  await profilePreference(manager.id,'42','forget');
  const removed=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});

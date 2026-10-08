@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { prisma } from '../../db';
 import { env } from '../../env';
-import { answerBotCallback, getChatMember, editChannelPost, telegramAction } from '../../lib/telegramBot';
+import { answerBotCallback, getChatMember, deleteBotMessage, TelegramApiError, telegramAction } from '../../lib/telegramBot';
 import { communityManagerExecutor } from '../managedBot';
 import { membershipReaderToken } from '../membership';
 import { collaberContext, createMatch, enqueueCollaber, ingestIntro, profilePreference, type Candidate } from './service';
@@ -89,7 +89,7 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     const profile=await prisma.collaberProfile.findFirst({where:{id:profileId,communityManagerId:managerId,tgUserId:userId,searchable:true,forgotten:false}});if(!profile)return;
     const consent=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+managerId+':'+userId}});if(!consent)return;
     const alreadyAccepted=consent.status==='COMPLETED'&&(consent.payload as any).choice===action;
-    if(alreadyAccepted&&(consent.payload as any).confirmed)return;
+    if(alreadyAccepted&&(consent.payload as any).removed)return;
     if(consent.status!=='WAITING'&&!alreadyAccepted)return;
     const accepted=alreadyAccepted||await prisma.$transaction(async tx=>{
       const claim=await tx.collaberTask.updateMany({where:{id:consent.id,status:'WAITING'},data:{status:'COMPLETED',payload:{...(consent.payload as any),choice:action}}});if(!claim.count)return false;
@@ -103,8 +103,9 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     if(sent?.telegramMessageId){
       const current=await prisma.collaberProfile.findUnique({where:{id:profile.id}});
       if(!current?.searchable||current.forgotten)return;
-      await editChannelPost({chatId:ctx.chatId,messageId:sent.telegramMessageId,blocks:null,text:current.publicMentions?'Интро сохранено. Показ в группе разрешён. /hide — скрыть профиль.':'Интро сохранено. Только личный подбор. /hide — скрыть профиль.',replyMarkup:{inline_keyboard:[]},token:ctx.executor.token});
-      await prisma.collaberTask.update({where:{id:consent.id},data:{payload:{...(consent.payload as any),choice:action,confirmed:true}}});
+      try{await deleteBotMessage(ctx.chatId,sent.telegramMessageId,ctx.executor.token)}
+      catch(error){if(!(error instanceof TelegramApiError&&error.code===400&&/message to delete not found/i.test(error.message)))throw error}
+      await prisma.collaberTask.update({where:{id:consent.id},data:{payload:{...(consent.payload as any),choice:action,confirmed:true,removed:true}}});
     }
     return;
   }
