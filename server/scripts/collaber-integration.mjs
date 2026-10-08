@@ -18,7 +18,8 @@ const express=require('express');
 const originalFetch=globalThis.fetch;
 globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
 env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
-let sends=0,ambiguous=false,noMatches=false,failEdit=false;const deliveries=[],edits=[];
+let sends=0,ambiguous=false,noMatches=false,failEdit=false;const deliveries=[],edits=[],markupEdits=[];
+telegram.telegramAction=async(method,payload)=>{assert.equal(method,'editMessageReplyMarkup');markupEdits.push(payload)};
 telegram.editChannelPost=async params=>{if(failEdit)throw new Error('Simulated edit failure');edits.push(params)};
 env.MODERATOR_BOT_TOKEN='200:moderator-test';
 telegram.getChatMember=async(chat,user,token)=>{
@@ -238,6 +239,15 @@ try{
  const verification=await findCandidates(manager.id,'Есть проекты с проверкой человечности?','811',config.features.collaber,true,false);
  assert.equal(verification.length,1);assert.equal(verification[0].tgUserId,'810');assert.match(verification[0].evidence,/верификацию/);
  assert.equal(verification[0].introUrl,'https://t.me/c/'+chat.tgChatId.slice(4)+'/810');
+ // Legacy profiles retain permalink proof in consent even after message history expires.
+ const {profileIntroLinks}=require('../dist/communityManager/collaber/sources.js');
+ const legacy=await prisma.collaberProfile.findUnique({where:{id:verification[0].id}});
+ const legacyFacts=legacy.facts.map(({sourceChatId,...fact})=>fact);
+ await prisma.collaberProfile.update({where:{id:legacy.id},data:{facts:legacyFacts}});
+ const legacyConsent=await prisma.collaberTask.create({data:{communityManagerId:manager.id,kind:'CONSENT',status:'COMPLETED',dedupeKey:'consent:'+manager.id+':810',payload:{userId:'810',sourceMessageId:810}}});
+ const legacyProfile={...legacy,facts:legacyFacts};
+ assert.equal((await profileIntroLinks(manager.id,chat.tgChatId,[legacyProfile])).get(legacy.id),'https://t.me/c/'+chat.tgChatId.slice(4)+'/810');
+ assert.equal((await profileIntroLinks(manager.id,'-100999999',[legacyProfile])).size,0);
  const reviewLog=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber_matching'},orderBy:{createdAt:'desc'}});
  assert.ok(reviewLog.metadata.decisions.some(d=>d.id===verification[0].id&&d.role==='provider'&&d.fit==='direct'&&d.returned));
  const beforeDiagnostic=sends;
@@ -249,6 +259,7 @@ try{
  telegram.getChatMember=originalMembership;
  // Private edits do not inherit a group source, even if Telegram IDs collide.
  await ingestIntro(manager.id,{...provider,id:'811',at:new Date(Date.now()+1000).toISOString(),sourceChatId:undefined},config.features.collaber,true,false);
+ await prisma.collaberTask.update({where:{id:legacyConsent.id},data:{payload:{userId:'810',sourceMessageId:811}}});
  const privateResult=await findCandidates(manager.id,'Ищу сервис верификации пользователей','811',config.features.collaber,true,false);
  assert.equal(privateResult[0].introUrl,undefined);
  ai.collaberJson=async(_manager,_stage,{system})=>system.startsWith('Given')?{keywords:['верификация']}:null;
@@ -281,6 +292,11 @@ try{
  assert.equal(await handleGroupCollaborationQuery(groupInput),true);
  assert.equal(sends,beforeRouting+1);assert.equal(routes,1);
  const routed=deliveries.at(-1);assert.equal(routed.replyId,820);assert.ok(!routed.html.includes('cover.png'));assert.ok(routed.keyboard.inline_keyboard.every(row=>row.every(b=>b.text.startsWith('Интро:'))));
+ const sentRequest=await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'811',status:'SENT'},orderBy:{createdAt:'desc'}});
+ const beforeLegacyClick=sends;
+ await processTelegramTask(task('811','cb:i:'+sentRequest.id+':0'));
+ assert.equal(sends,beforeLegacyClick,'legacy intro click must not publish a copy');
+ assert.ok(markupEdits.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.url==='https://t.me/c/'+chat.tgChatId.slice(4)+'/812'));
  assert.ok(routed.keyboard.inline_keyboard.flat().some(b=>b.url==='https://t.me/c/'+chat.tgChatId.slice(4)+'/812'));
  assert.ok(!routed.keyboard.inline_keyboard.flat().some(b=>b.text.startsWith('Написать')));
  await handleGroupCollaborationQuery(groupInput);assert.equal(sends,beforeRouting+1);assert.equal(routes,1);

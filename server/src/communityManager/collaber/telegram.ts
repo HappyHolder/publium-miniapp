@@ -1,11 +1,12 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { prisma } from '../../db';
 import { env } from '../../env';
-import { answerBotCallback, getChatMember, editChannelPost } from '../../lib/telegramBot';
+import { answerBotCallback, getChatMember, editChannelPost, telegramAction } from '../../lib/telegramBot';
 import { communityManagerExecutor } from '../managedBot';
 import { membershipReaderToken } from '../membership';
 import { collaberContext, createMatch, enqueueCollaber, ingestIntro, profilePreference, type Candidate } from './service';
-import { deliverMatch, deliverMessage } from './delivery';
+import { deliverMatch, deliverMessage, matchPresentation } from './delivery';
+import { profileIntroLinks } from './sources';
 import { canAct, contactUrl, preferenceCommand, safeUsername, type IntroMessage } from './domain';
 
 const signature=(text:string)=>createHmac('sha256',env.COMMUNITY_MANAGER_WEBHOOK_SECRET||env.TELEGRAM_BOT_TOKEN).update(text).digest('base64url').slice(0,16);
@@ -114,7 +115,17 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     const candidate=(request.candidates as unknown as Candidate[])[Number(index)];if(!candidate)return;
     const profile=await prisma.collaberProfile.findFirst({where:{id:candidate.id,communityManagerId:managerId,searchable:true,forgotten:false,...(replyChat.startsWith('-')?{publicMentions:true}:{})},include:{participant:true}});if(!profile)return;
     await memberAccess(managerId,profile.tgUserId);
-    if(kind==='i'){await respond(`${profile.participant.displayName}\nИнтро от ${profile.sourceAt?.toLocaleDateString('ru-RU')??'неизвестной даты'}:\n${profile.sourceText.slice(0,3000)}`);return}
+    if(kind==='i'){
+      // Upgrade legacy callback buttons in place; never repost an intro into the chat.
+      if(!request.telegramMessageId||p.callback.chatId!==request.chatId)return;
+      const candidates=request.candidates as unknown as Candidate[];
+      const profiles=await prisma.collaberProfile.findMany({where:{id:{in:candidates.map(c=>c.id)},communityManagerId:managerId,searchable:true,forgotten:false,...(replyChat.startsWith('-')?{publicMentions:true}:{})}});
+      const links=await profileIntroLinks(managerId,ctx.chatId,profiles);
+      const refreshed=candidates.map(c=>({...c,introUrl:links.get(c.id)}));
+      const {keyboard}=matchPresentation({...request,candidates:refreshed},ctx.config.features.collaber);
+      await telegramAction('editMessageReplyMarkup',{chat_id:request.chatId,message_id:request.telegramMessageId,reply_markup:keyboard},ctx.executor.token);
+      return;
+    }
     if(kind==='n'){
       const sessions=await prisma.collaberSession.findMany({where:{communityManagerId:managerId,botId:p.botId,tgUserId:{in:[userId,profile.tgUserId]},expiresAt:{gt:new Date()}}});
       if(!sessions.some(s=>s.tgUserId===userId)){await respond('Для знакомства сначала открой личный диалог с ботом, затем нажми «Познакомить» ещё раз.',{inline_keyboard:[[{text:'Открыть бота',url:'https://t.me/'+ctx.executor.username+'?start='+entryPayload(managerId)}]]});return}

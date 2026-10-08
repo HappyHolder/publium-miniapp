@@ -24,7 +24,7 @@ export function matchPresentation(request:{id:string;query:string;candidates:unk
   candidates.forEach((candidate,index)=>{
     const url=contactUrl(candidate.username,request.initiative?'возможное сотрудничество по твоему интро':request.query);
     if(config.buttons.contact&&url)keyboard.inline_keyboard.push([{text:('Написать '+candidate.name).slice(0,60),url}]);
-    if(config.buttons.intro)keyboard.inline_keyboard.push([{text:('Интро: '+candidate.name).slice(0,60),...(candidate.introUrl?{url:candidate.introUrl}:{callback_data:`cb:i:${request.id}:${index}`})}]);
+    if(config.buttons.intro&&candidate.introUrl)keyboard.inline_keyboard.push([{text:('Интро: '+candidate.name).slice(0,60),url:candidate.introUrl}]);
     if(config.buttons.introduce)keyboard.inline_keyboard.push([{text:('Познакомить: '+candidate.name).slice(0,60),callback_data:`cb:n:${request.id}:${index}`}]);
   });
   if(config.buttons.refine)keyboard.inline_keyboard.push([{text:'Уточнить подбор',callback_data:`cb:r:${request.id}:0`},...(candidates.length?[{text:'Не подходит',callback_data:`cb:f:${request.id}:0`}]:[])]);

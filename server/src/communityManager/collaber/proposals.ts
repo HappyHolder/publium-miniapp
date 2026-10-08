@@ -30,7 +30,7 @@ export async function afterLiveIntro(managerId:string,message:IntroMessage){
   if(profile.publicMentions){await propose(managerId,message.userId,'intro:'+message.id,Number(message.id));return}
   const dedupeKey='consent:'+managerId+':'+message.userId;
   const existing=await prisma.collaberTask.findUnique({where:{dedupeKey}});if(existing)return;
-  const consent=await prisma.collaberTask.create({data:{communityManagerId:managerId,kind:'CONSENT',status:'WAITING',dedupeKey,payload:{userId:message.userId,sourceMessageId:Number(message.id)}}});
+  const consent=await prisma.collaberTask.create({data:{communityManagerId:managerId,kind:'CONSENT',status:'WAITING',dedupeKey,payload:{userId:message.userId,sourceMessageId:Number(message.id),sourceChatId:ctx.chatId}}});
   await enqueueCollaber(managerId,'CONSENT_PROMPT','consent-prompt:'+consent.id,{userId:message.userId,consentId:consent.id});
 }
 

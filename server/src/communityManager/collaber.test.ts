@@ -141,11 +141,11 @@ test('model failure and invented candidate IDs cannot masquerade as no matches',
  for(const result of [null,{ids:null},{ids:['invented']},{ids:[42]}])assert.throws(()=>reviewedIds(result,allowed),/корректный список/);
 });
 
-test('intro button opens a verified group source and otherwise keeps the profile fallback',()=>{
+test('intro buttons only link to verified group sources and never repost a profile',()=>{
  const c={id:'p',tgUserId:'42',name:'Анна',username:null,description:'Проект',reason:'Предложение',at:message.at};
  const result=matchPresentation({id:'r',query:'партнёр',candidates:[{...c,introUrl:'https://t.me/c/123/17'},c]},DEFAULT_COLLABER);
  const buttons=result.keyboard.inline_keyboard.flat().filter(b=>b.text.startsWith('Интро:'));
- assert.deepEqual(buttons,[{text:'Интро: Анна',url:'https://t.me/c/123/17'},{text:'Интро: Анна',callback_data:'cb:i:r:1'}]);
+ assert.deepEqual(buttons,[{text:'Интро: Анна',url:'https://t.me/c/123/17'}]);
 });
 
 test('conversational intro references use only actual cited group messages',()=>{
