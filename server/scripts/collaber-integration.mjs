@@ -144,7 +144,10 @@ try{
  // Group-first onboarding uses actual source message IDs and no private session.
  const saveConfig=()=>prisma.communityManagerConfig.update({where:{communityManagerId_version:{communityManagerId:manager.id,version:1}},data:{config}});
  config.features.collaber.initiatives='auto';config.features.collaber.periodicDays=0;config.features.collaber.maxInitiativesPerDay=5;
- config.features.collaber.imageUrl='https://example.com/cover.png';config.replies.conversationMemory=true;await saveConfig();
+ config.features.collaber.imageUrl='https://example.com/cover.png';
+ config.features.collaber.showImage=false;config.features.collaber.introduction='';
+ config.features.collaber.buttons={contact:false,intro:true,introduce:false,refine:false};
+ config.replies.conversationMemory=true;await saveConfig();
  await ingestIntro(manager.id,{...intro,id:'600',userId:'60',at:new Date().toISOString()},config.features.collaber);
  await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'60'},data:{publicMentions:true}});
  await queueLiveIntro(manager.id,{message_id:700,from:{id:56,first_name:'Борис',username:'boris_test'},text:'#intro Меня зовут Борис. Разрабатываю мини-приложение и могу помочь с интеграциями.',date:Math.floor(Date.now()/1000)});
@@ -194,7 +197,7 @@ try{
  assert.equal((await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'58',initiative:true}})).status,'NO_MATCH');
  const empty=await createMatch({managerId:manager.id,userId:'58',chatId:'58',query:'ищу маркетолога',dedupeKey:'empty-'+tag});
  await deliverMatch(empty.id,manager.id);const emptyDelivery=deliveries.at(-1);
- assert.ok(!emptyDelivery.html.includes('cover.png'));assert.equal(emptyDelivery.keyboard.inline_keyboard.length,1);assert.equal(emptyDelivery.keyboard.inline_keyboard[0].length,1);
+ assert.ok(!emptyDelivery.html.includes('cover.png'));assert.equal(emptyDelivery.keyboard.inline_keyboard.length,0);
  await processTelegramTask(task('58','cb:good:'+empty.id+':0'));
  assert.equal((await prisma.collaberRequest.findUnique({where:{id:empty.id}})).feedback,null);
  const resultsData=await (await fetch(base+manager.id+'/collaber',{headers})).json();

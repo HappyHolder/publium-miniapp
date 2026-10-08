@@ -11,17 +11,15 @@ import { memberAccess } from './telegram';
 import type { CollaberConfig } from './config';
 
 export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean;chatId?:string},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
-  const candidates=Array.isArray(request.candidates)?request.candidates as Candidate[]:[];
-  if(request.chatId?.startsWith('-')){
-    const shown=candidates.slice(0,2);
+  const isGroup=Boolean(request.chatId?.startsWith('-'));
+  const allCandidates=Array.isArray(request.candidates)?request.candidates as Candidate[]:[];
+  const candidates=isGroup?allCandidates.slice(0,2):allCandidates;
+  let paragraphs:string[];
+  if(isGroup){
     const short=(value:string,max:number)=>value.length<=max?value:value.slice(0,max-1).replace(/\s+\S*$/u,'')+'…';
-    const paragraphs=shown.length?shown.map(c=>`${short(c.name,60)}${c.description.startsWith('Дополнительно:')?' — дополнительно':''}\n«${short(c.evidence.replace(/\s+/gu,' ').trim(),220)}»`):[emptyText];
-    if(shown.some(c=>c.reason.includes('Исторические сведения')))paragraphs.push('Актуальность этих сведений стоит уточнить у автора.');
-    const keyboard:TelegramInlineKeyboard={inline_keyboard:shown.map((c,index)=>[{text:short('Интро: '+c.name,60),...(c.introUrl?{url:c.introUrl}:{callback_data:`cb:i:${request.id}:${index}`})}])};
-    const blocks:PostBlock[]=paragraphs.flatMap(p=>p.split('\n')).map(text=>({type:'paragraph',runs:[{t:text}]}));
-    return {text:paragraphs.join('\n\n'),html:blocksToRichHtml(blocks),keyboard};
-  }
-  const paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
+    paragraphs=candidates.length?[config.introduction,...candidates.map(c=>`${short(c.name,60)}${c.description.startsWith('Дополнительно:')?' — дополнительно':''}\n«${short(c.evidence.replace(/\s+/gu,' ').trim(),220)}»`)]:[emptyText];
+    if(candidates.some(c=>c.reason.includes('Исторические сведения')))paragraphs.push('Актуальность этих сведений стоит уточнить у автора.');
+  }else paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
   const keyboard:TelegramInlineKeyboard={inline_keyboard:[]};
   candidates.forEach((candidate,index)=>{
     const url=contactUrl(candidate.username,request.initiative?'возможное сотрудничество по твоему интро':request.query);

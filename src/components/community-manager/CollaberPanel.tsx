@@ -53,9 +53,8 @@ export function CollaberPanel({managerId,value,onChange,managerEnabled,memoryEna
    <label className={label}>Периодическая проверка, дней (0 — выключена)<NumberStepper value={value.periodicDays} min={0} max={30} onChange={periodicDays=>update({periodicDays})}/></label>
    <label className={label}>Через сколько дней уточнять актуальность<NumberStepper value={value.freshnessDays} min={7} max={365} onChange={freshnessDays=>update({freshnessDays})}/></label>
    <p className="text-[12px] leading-relaxed text-[#A1A1AA]">Поиск использует все сохранённые интро. Старые интро остаются в подборе с пометкой об актуальности; истёкший запрос сам по себе не запускает инициативу.</p>
-   <div className={card+' space-y-3'}><p className="text-[14px] font-semibold text-white">В группе</p><p className="text-[13px] leading-relaxed text-[#A1A1AA]">Короткий ответ без обложки: до двух людей и кнопки их интро. Для уточнения участник отвечает на сообщение бота.</p><p className="text-[14px] text-white">Анна<br/>«Разрабатываю приложение для изучения языков»</p><div className="flex min-h-11 items-center justify-center rounded-[10px] border border-white/[.07] bg-white/[.05] text-[13px] text-white">Интро: Анна</div></div>
-   <div className={card+' space-y-3'}><p className="text-[14px] font-semibold text-white">В личном диалоге</p>
-    <Switch label="Обложка в личном подборе" value={value.showImage} onChange={showImage=>update({showImage})}/>
+   <div className={card+' space-y-3'}><p className="text-[14px] font-semibold text-white">Оформление сообщения</p>
+    <Switch label="Обложка в подборе с найденными людьми" value={value.showImage} onChange={showImage=>update({showImage})}/>
     <input ref={imageRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)void uploadImage(f);e.target.value=''}}/>
     <Button className="min-h-11" fullWidth disabled={Boolean(busy)} onClick={()=>imageRef.current?.click()}><ImagePlus size={16}/>{value.imageUrl?'Заменить обложку':'Загрузить обложку'}</Button>
     {value.imageUrl&&<Button className="min-h-11" variant="ghost" onClick={()=>update({imageUrl:''})}><X size={15}/> Убрать обложку</Button>}
@@ -64,7 +63,7 @@ export function CollaberPanel({managerId,value,onChange,managerEnabled,memoryEna
    </div>
    <div className="overflow-hidden rounded-[18px] border border-white/[.08] bg-[#111114]">
     {value.showImage&&value.imageUrl&&<img src={value.imageUrl} alt="Обложка Collaber" className="max-h-48 w-full object-cover"/>}
-    <div className="space-y-3 p-4"><p className="text-[11px] text-[#A1A1AA]">Личный диалог · вымышленный пример</p><p className="whitespace-pre-wrap text-[14px] text-white">{value.introduction}</p><p className="text-[14px] font-semibold text-white">Анна · приложение для языков</p><p className="text-[14px] leading-relaxed text-[#A1A1AA]">Открыта к обмену аудиторией. Можно обсудить совместный языковой челлендж.</p>
+    <div className="space-y-3 p-4"><p className="text-[11px] text-[#A1A1AA]">Предпросмотр · вымышленный пример</p><p className="whitespace-pre-wrap text-[14px] text-white">{value.introduction}</p><p className="text-[14px] font-semibold text-white">Анна · приложение для языков</p><p className="text-[14px] leading-relaxed text-[#A1A1AA]">Открыта к обмену аудиторией. Можно обсудить совместный языковой челлендж.</p>
      {([['contact','Написать Анне'],['intro','Посмотреть интро'],['introduce','Помочь познакомиться'],['refine','Уточнить подбор / Оценить']] as const).filter(([key])=>value.buttons[key]).map(([key,title])=><div key={key} className="flex min-h-11 items-center justify-center rounded-[10px] border border-white/[.07] bg-white/[.05] px-2 text-center text-[13px] text-white">{title}</div>)}
     </div>
    </div><p className="text-[11px] leading-relaxed text-[#A1A1AA]">Вид кнопок в чате зависит от темы Telegram. «Написать» открывает контакт; сообщение отправляет сам участник.</p>
