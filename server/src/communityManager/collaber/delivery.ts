@@ -10,8 +10,17 @@ import { contactUrl } from './domain';
 import { memberAccess } from './telegram';
 import type { CollaberConfig } from './config';
 
-export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
+export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean;chatId?:string},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
   const candidates=Array.isArray(request.candidates)?request.candidates as Candidate[]:[];
+  if(request.chatId?.startsWith('-')){
+    const shown=candidates.slice(0,2);
+    const short=(value:string,max:number)=>value.length<=max?value:value.slice(0,max-1).replace(/\s+\S*$/u,'')+'…';
+    const paragraphs=shown.length?shown.map(c=>`${short(c.name,60)}${c.description.startsWith('Дополнительно:')?' — дополнительно':''}\n«${short(c.evidence.replace(/\s+/gu,' ').trim(),220)}»`):[emptyText];
+    if(shown.some(c=>c.reason.includes('Исторические сведения')))paragraphs.push('Актуальность этих сведений стоит уточнить у автора.');
+    const keyboard:TelegramInlineKeyboard={inline_keyboard:shown.map((c,index)=>[{text:short('Интро: '+c.name,60),...(c.introUrl?{url:c.introUrl}:{callback_data:`cb:i:${request.id}:${index}`})}])};
+    const blocks:PostBlock[]=paragraphs.flatMap(p=>p.split('\n')).map(text=>({type:'paragraph',runs:[{t:text}]}));
+    return {text:paragraphs.join('\n\n'),html:blocksToRichHtml(blocks),keyboard};
+  }
   const paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
   const keyboard:TelegramInlineKeyboard={inline_keyboard:[]};
   candidates.forEach((candidate,index)=>{
@@ -91,7 +100,7 @@ export async function deliverMatch(requestId:string,managerId:string,approved=fa
     if(state?.pendingModeratorAt&&state.pendingModeratorAt>new Date(Date.now()-30*60000))return;
     const activity=await prisma.communityManagerActivity.findFirst({where:{communityManagerId:managerId,status:{in:['PROCESSING','RUNNING','SENDING','ACTIVE']}}});if(activity)return;
   }else if(!cfg.onDemand)return;
-  const candidates=await refreshCandidates(managerId,request.tgUserId,request.candidates,request.chatId.startsWith('-'));
+  const candidates=(await refreshCandidates(managerId,request.tgUserId,request.candidates,request.chatId.startsWith('-'))).slice(0,request.chatId.startsWith('-')?2:3);
   if(request.initiative&&!candidates.length){await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'NO_MATCH',candidates:[]}});return}
   const claim=await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'SENDING',candidates:candidates as any}});if(!claim.count)return;
   const presentation=matchPresentation({...request,candidates},cfg,candidates.length?undefined:await emptyMatchText(managerId,request.tgUserId,request.chatId.startsWith('-')));

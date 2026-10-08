@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { prisma } from '../../db';
 import { env } from '../../env';
-import { answerBotCallback, getChatMember } from '../../lib/telegramBot';
+import { answerBotCallback, getChatMember, editChannelPost } from '../../lib/telegramBot';
 import { communityManagerExecutor } from '../managedBot';
 import { membershipReaderToken } from '../membership';
 import { collaberContext, createMatch, enqueueCollaber, ingestIntro, profilePreference, type Candidate } from './service';
@@ -68,17 +68,25 @@ export async function processTelegramTask(task:{id:string;communityManagerId:str
     const [,profileId,action]=String(p.callback.data).split(':');
     if(!['public','private'].includes(action)||p.callback.chatId!==ctx.chatId)return;
     const profile=await prisma.collaberProfile.findFirst({where:{id:profileId,communityManagerId:managerId,tgUserId:userId,searchable:true,forgotten:false}});if(!profile)return;
-    const consent=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+managerId+':'+userId}});if(!consent||consent.status!=='WAITING')return;
-    const accepted=await prisma.$transaction(async tx=>{
-      const claim=await tx.collaberTask.updateMany({where:{id:consent.id,status:'WAITING'},data:{status:'COMPLETED'}});if(!claim.count)return false;
+    const consent=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent:'+managerId+':'+userId}});if(!consent)return;
+    const alreadyAccepted=consent.status==='COMPLETED'&&(consent.payload as any).choice===action;
+    if(alreadyAccepted&&(consent.payload as any).confirmed)return;
+    if(consent.status!=='WAITING'&&!alreadyAccepted)return;
+    const accepted=alreadyAccepted||await prisma.$transaction(async tx=>{
+      const claim=await tx.collaberTask.updateMany({where:{id:consent.id,status:'WAITING'},data:{status:'COMPLETED',payload:{...(consent.payload as any),choice:action}}});if(!claim.count)return false;
       const current=await tx.collaberProfile.updateMany({where:{id:profile.id,searchable:true,forgotten:false},data:{publicMentions:action==='public'}});
       if(current.count&&action==='public')await tx.collaberTask.upsert({where:{dedupeKey:'consent-propose:'+consent.id},create:{communityManagerId:managerId,kind:'PROPOSE',dedupeKey:'consent-propose:'+consent.id,payload:{userId,sourceMessageId:(consent.payload as any).sourceMessageId}},update:{}});
       return Boolean(current.count);
     });
     if(!accepted)return;
-    const others=action==='public'?await prisma.collaberProfile.count({where:{communityManagerId:managerId,tgUserId:{not:userId},searchable:true,publicMentions:true,forgotten:false,sourceAt:{not:null},membership:{not:'LEFT'}}}):0;
-    const confirmation=action==='public'?(others?'Разрешение сохранено. Если найдётся подходящий человек, предложу знакомство ответом на твоё интро.':'Разрешение сохранено. Пока в базе нет других участников, разрешивших публичный подбор. Для рекомендации нужны их интро и разрешение на показ в группе.'):'Сохранено: профиль доступен только для личного подбора.';
-    await deliverMessage(managerId,ctx.chatId,confirmation,undefined,task.id,undefined,(consent.payload as any).sourceMessageId);
+    const prompt=await prisma.collaberTask.findUnique({where:{dedupeKey:'consent-prompt:'+consent.id}});
+    const sent=prompt?await prisma.communityManagerAction.findFirst({where:{communityManagerId:managerId,intent:'collaber',status:'COMPLETED',metadata:{path:['collaberKey'],equals:prompt.id}},select:{telegramMessageId:true}}):null;
+    if(sent?.telegramMessageId){
+      const current=await prisma.collaberProfile.findUnique({where:{id:profile.id}});
+      if(!current?.searchable||current.forgotten)return;
+      await editChannelPost({chatId:ctx.chatId,messageId:sent.telegramMessageId,blocks:null,text:current.publicMentions?'Интро сохранено. Показ в группе разрешён. /hide — скрыть профиль.':'Интро сохранено. Только личный подбор. /hide — скрыть профиль.',replyMarkup:{inline_keyboard:[]},token:ctx.executor.token});
+      await prisma.collaberTask.update({where:{id:consent.id},data:{payload:{...(consent.payload as any),choice:action,confirmed:true}}});
+    }
     return;
   }
   if(p.callback){

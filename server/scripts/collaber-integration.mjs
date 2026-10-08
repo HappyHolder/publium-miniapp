@@ -18,7 +18,8 @@ const express=require('express');
 const originalFetch=globalThis.fetch;
 globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args);throw new Error('Unexpected network access in Collaber integration')};
 env.COMMUNITY_MANAGER_BOT_TOKEN='100:test';env.COMMUNITY_MANAGER_BOT_USERNAME='fixture_bot';
-let sends=0,ambiguous=false,noMatches=false;const deliveries=[];
+let sends=0,ambiguous=false,noMatches=false,failEdit=false;const deliveries=[],edits=[];
+telegram.editChannelPost=async params=>{if(failEdit)throw new Error('Simulated edit failure');edits.push(params)};
 env.MODERATOR_BOT_TOKEN='200:moderator-test';
 telegram.getChatMember=async(chat,user,token)=>{
  if(token==='100:test'&&Number(user)!==100)throw new Error('Non-admin CM must not verify other users');
@@ -154,8 +155,9 @@ try{
  const publicButton=prompt.keyboard.inline_keyboard[0][0].callback_data;
  const beforeStranger=sends;await processTelegramTask(task('99',publicButton));assert.equal(sends,beforeStranger);
  assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,false);
- await processTelegramTask(task('56',publicButton));const afterPublic=sends;
- await processTelegramTask(task('56',publicButton));assert.equal(sends,afterPublic);
+ const beforeConsent=sends;failEdit=true;await assert.rejects(processTelegramTask(task('56',publicButton)),/edit failure/);failEdit=false;
+ await processTelegramTask(task('56',publicButton));const afterPublic=sends;assert.equal(sends,beforeConsent);assert.match(edits.at(-1).text,/Показ в группе разрешён/);assert.deepEqual(edits.at(-1).replyMarkup,{inline_keyboard:[]});
+ const editCount=edits.length;await processTelegramTask(task('56',publicButton));assert.equal(sends,afterPublic);assert.equal(edits.length,editCount);
  assert.equal((await prisma.collaberProfile.findUnique({where:{id:boris.id}})).publicMentions,true);
  console.log('PASS live group intro saves profile; author-only public consent works without starting a private bot session');
 
@@ -171,7 +173,7 @@ try{
  await prisma.communityManagerConversationState.upsert({where:{communityManagerId:manager.id},create:{communityManagerId:manager.id,lastHumanAt:new Date()},update:{lastHumanAt:new Date()}});
  await processCollaberJobs();
  proposal=await prisma.collaberRequest.findUnique({where:{id:proposal.id}});assert.equal(proposal.status,'SENT');
- const groupMatch=deliveries.find(d=>d.replyId===700&&d.html);assert.ok(groupMatch.html.includes('cover.png'));
+ const groupMatch=deliveries.find(d=>d.replyId===700&&d.html);assert.ok(!groupMatch.html.includes('cover.png'));assert.ok(groupMatch.keyboard.inline_keyboard.length<=2);
  assert.equal(groupMatch.chat,chat.tgChatId);
  console.log('PASS intro match replies to source despite current conversation; quiet-hour retry works with periodicDays=0');
 
@@ -203,9 +205,9 @@ try{
  await processCollaberJobs();await processCollaberJobs();
  const oleg=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'59'}}});
  await processTelegramTask(task('59','cp:'+oleg.id+':public'));
- assert.match(deliveries.at(-1).text,/Разрешение сохранено.*нет других участников/);
- assert.equal(deliveries.at(-1).replyId,703);
- console.log('PASS public consent explicitly explains that no other public profiles are available');
+ assert.match(edits.at(-1).text,/Показ в группе разрешён/);
+ assert.equal(edits.at(-1).chatId,chat.tgChatId);
+ console.log('PASS consent updates the original prompt instead of adding confirmation messages');
  noMatches=false;
  await profilePreference(manager.id,'42','forget');
  const removed=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
@@ -262,6 +264,8 @@ try{
      if(p.text==='Привет!')return {kind:'NONE',query:''};
      if(p.text==='Найди партнёра')return {kind:'CLARIFY',query:''};
      if(p.text==='Для верификации')assert.equal(p.clarificationContext,'Найди партнёра');
+     if(p.text==='Нужен именно готовый сервис')assert.equal(p.clarificationContext,'Сервис верификации пользователей');
+     if(p.text==='Уточнение чужого запроса')assert.equal(p.clarificationContext,undefined);
      return {kind:'SEARCH',query:'Сервис верификации пользователей'};
    }
    if(system.startsWith('Given'))return {keywords:['верификация','пользователи']};
@@ -273,9 +277,9 @@ try{
  const beforeRouting=sends;
  assert.equal(await handleGroupCollaborationQuery(groupInput),true);
  assert.equal(sends,beforeRouting+1);assert.equal(routes,1);
- const routed=deliveries.at(-1);assert.equal(routed.replyId,820);assert.ok(routed.html.includes('cover.png'));
+ const routed=deliveries.at(-1);assert.equal(routed.replyId,820);assert.ok(!routed.html.includes('cover.png'));assert.ok(routed.keyboard.inline_keyboard.every(row=>row.every(b=>b.text.startsWith('Интро:'))));
  assert.ok(routed.keyboard.inline_keyboard.flat().some(b=>b.url==='https://t.me/c/'+chat.tgChatId.slice(4)+'/812'));
- assert.ok(routed.keyboard.inline_keyboard.flat().some(b=>b.text.startsWith('Написать')));
+ assert.ok(!routed.keyboard.inline_keyboard.flat().some(b=>b.text.startsWith('Написать')));
  await handleGroupCollaborationQuery(groupInput);assert.equal(sends,beforeRouting+1);assert.equal(routes,1);
  assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'human-'+tag,addressedToOtherHuman:true}),false);assert.equal(routes,1);
  assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'hello-'+tag,text:'Привет!'}),false);assert.equal(sends,beforeRouting+1);
@@ -283,9 +287,12 @@ try{
  assert.match(deliveries.at(-1).text,/Для какой задачи/);
  const clarificationAction=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber',status:'COMPLETED'},orderBy:{createdAt:'desc'}});
  assert.equal(await handleGroupCollaborationQuery({...groupInput,eventKey:'followup-'+tag,text:'Для верификации',messageId:822,replyToMessageId:clarificationAction.telegramMessageId}),true);
- assert.ok(deliveries.at(-1).html.includes('cover.png'));
+ assert.ok(deliveries.at(-1).keyboard.inline_keyboard.some(row=>row.some(b=>b.text.startsWith('Интро:'))));
  await handleGroupCollaborationQuery({...groupInput,eventKey:'self-'+tag,userId:'810',messageId:823});
- assert.ok(!deliveries.at(-1).html.includes('cover.png'),'requester must not recommend themselves');
+ assert.equal(deliveries.at(-1).keyboard.inline_keyboard.length,0,'requester must not recommend themselves');
+ const previousSearch=await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'811',status:'SENT'},orderBy:{createdAt:'desc'}});
+ await handleGroupCollaborationQuery({...groupInput,eventKey:'refine-result-'+tag,text:'Нужен именно готовый сервис',messageId:824,replyToMessageId:previousSearch.telegramMessageId});
+ await handleGroupCollaborationQuery({...groupInput,eventKey:'foreign-refine-'+tag,userId:'999',text:'Уточнение чужого запроса',messageId:825,replyToMessageId:previousSearch.telegramMessageId});
  ai.collaberJson=originalInference;
  console.log('PASS natural group search renders one card with verified intro link; deduplication, normal chat, human reply exclusion, clarification follow-up and self exclusion');
 

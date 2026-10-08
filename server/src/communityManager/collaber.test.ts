@@ -88,6 +88,17 @@ test('rich result keeps names, description and reason in separate paragraphs',()
  const result=matchPresentation({id:'r',query:'партнёр',candidates:[{name:'Анна',description:'Создаёт приложение',reason:'Предлагает продвижение',at:message.at}]},DEFAULT_COLLABER);
  assert.match(result.html,/<p>1\. Анна<\/p>/);assert.match(result.html,/<p>Создаёт приложение<\/p>/);assert.match(result.html,/<p>Предлагает продвижение<\/p>/);
 });
+
+test('group results are short, image-free and have only one intro button per person',()=>{
+ const candidate={id:'p',tgUserId:'42',name:'Анна <b>',username:'test',description:'Дополнительно: интеграция',reason:'Причина',evidence:'Предлагаю помощь с интеграцией API. '.repeat(25),at:message.at,introUrl:'https://t.me/c/123/17'};
+ const result=matchPresentation({id:'r',chatId:'-100123',query:'интеграция',candidates:[candidate,candidate,candidate]}, {...DEFAULT_COLLABER,imageUrl:'https://example.com/cover.png'});
+ assert.ok(!result.html.includes('cover.png'));assert.ok(result.text.length<600);assert.ok(!result.text.includes('Источник:'));
+ assert.equal(result.keyboard.inline_keyboard.length,2);
+ assert.ok(result.keyboard.inline_keyboard.every(row=>row.length===1&&row[0].text.startsWith('Интро:')));
+ assert.ok(result.html.includes('&lt;b&gt;'));
+ const empty=matchPresentation({id:'r',chatId:'-100123',query:'задача',candidates:[]},DEFAULT_COLLABER);
+ assert.deepEqual(empty.keyboard.inline_keyboard,[]);
+});
 test('candidate facts distinguish useful offers from irrelevant words',()=>{
  const facts=validateFacts([{kind:'offer',value:'x',evidence:'Разрабатываю приложение для изучения языков.'}],message,90);
  assert.equal(rankFacts('разработка приложения для языков',facts).length,1);assert.equal(rankFacts('сварка металла',facts).length,0);

@@ -100,7 +100,7 @@ export async function findCandidates(managerId:string,query:string,userId:string
   shortlisted=ranked.length;
   const sources=ranked.map(x=>({id:x.row.id,intro:x.passages,introAt:x.row.sourceAt?.toISOString(),facts:factsOf(x.row.facts).map(f=>({kind:f.kind,text:f.evidence.slice(0,700),at:f.at,needsConfirmation:factNeedsConfirmation(f,config.freshnessDays)}))}));
   const decisions=sources.length?reviewDecisions(await collaberJson(managerId,'Проверка кандидатов',{system:REVIEW_PROMPT,prompt:JSON.stringify({query,requester,candidates:sources}),maxTokens:Math.min(6000,400+sources.length*200),timeoutMs:60000}),sources):[];
-  const selected=selectedDecisions(decisions);
+  const selected=selectedDecisions(decisions).slice(0,publicOnly?2:3);
   semantic=selected.length;
   const ctx=selected.length?await collaberContext(managerId):null;
   const executor=ctx&&verifyMembership?await communityManagerExecutor(ctx.manager.communityId):null;
@@ -164,7 +164,7 @@ export async function createMatch(input:{managerId:string;userId:string;chatId:s
   const ctx=await collaberContext(input.managerId,Boolean(input.preview));if(!ctx)throw new Error('Community Manager недоступен');
   const c=ctx.config.features.collaber;
   if(!input.preview&&(!ctx.manager.enabled||!c.enabled||(!input.initiative&&!c.onDemand)))throw new Error('Collaber выключен');
-  const candidates=await findCandidates(input.managerId,input.query,input.userId,c,input.chatId.startsWith('-'),!input.preview);
+  const candidates=(await findCandidates(input.managerId,input.query,input.userId,c,input.chatId.startsWith('-'),!input.preview)).slice(0,input.chatId.startsWith('-')?2:3);
   return prisma.collaberRequest.upsert({where:{dedupeKey:input.dedupeKey},create:{communityManagerId:input.managerId,tgUserId:input.userId,chatId:input.chatId,query:input.query.slice(0,500),dedupeKey:input.dedupeKey,sourceMessageId:input.sourceMessageId,candidates:candidates as unknown as Prisma.InputJsonValue,initiative:Boolean(input.initiative),status:input.preview?'PREVIEW':input.initiative?'DRAFT':'READY'},update:{}});
 }
 export function liveMessage(m:any):IntroMessage{return {id:String(m.telegramMessageId??m.message_id),userId:String(m.tgUserId??m.from?.id),name:m.from?[m.from.first_name,m.from.last_name].filter(Boolean).join(' '):'Участник '+m.tgUserId,username:m.from?.username??null,text:m.text??m.caption??'',at:new Date(m.createdAt??(m.date?m.date*1000:Date.now())).toISOString()}}

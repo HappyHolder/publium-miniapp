@@ -41,7 +41,7 @@ export async function sendConsentPrompt(task:{id:string;communityManagerId:strin
   const profile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:p.userId}}});
   if(!consent||!profile?.searchable||profile.forgotten||profile.publicMentions)return;
   const sourceMessageId=(consent.payload as {sourceMessageId:number}).sourceMessageId;
-  await deliverMessage(managerId,ctx.chatId,'Интро сохранено. Можно предлагать тебя для сотрудничества прямо в этой группе?\n\nВ личном подборе профиль уже доступен. /hide — скрыть его из поиска.',{inline_keyboard:[[{text:'Да, можно в группе',callback_data:'cp:'+profile.id+':public'}],[{text:'Только личный подбор',callback_data:'cp:'+profile.id+':private'}]]},task.id,undefined,sourceMessageId,false,async()=>{
+  await deliverMessage(managerId,ctx.chatId,'Интро сохранено для личного подбора. Можно рекомендовать тебя и в группе? /hide — скрыть профиль.',{inline_keyboard:[[{text:'Да, в группе',callback_data:'cp:'+profile.id+':public'},{text:'Только лично',callback_data:'cp:'+profile.id+':private'}]]},task.id,undefined,sourceMessageId,false,async()=>{
     const current=await prisma.collaberProfile.findUnique({where:{id:profile.id}});
     if(!current?.searchable||current.forgotten)throw new Error('Участник скрыл профиль');
   });

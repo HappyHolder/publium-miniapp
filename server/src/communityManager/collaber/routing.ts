@@ -9,7 +9,7 @@ SEARCH: the person wants to discover people, partners, specialists, teams, proje
 Examples of SEARCH: "Есть какие-то проекты с проверкой человечности?", "Кто тут занимается продвижением?", "Посоветуй разработчика для интеграции API", "Нужен партнёр для кросс-промо", "Any teams building identity verification?". A broad but stated topic is enough to search; do not ask anti-sybil vs KYC before checking available profiles. Keep the original meaning and uncertainty; do not invent requirements.
 CLARIFY: explicitly asks for a match/person/project but provides no topic or task at all, e.g. "Найди мне партнёра". Query must be empty.
 NONE: greetings, thanks, introductions, general explanations ("Как работает верификация?"), news, questions about a known product's features, quotations or reports of someone else's search, an explicitly cancelled search, or an explicit request to research the external web instead of this community. Query must be empty.
-If clarificationContext is supplied, it is a previous unfinished search by THIS author. Interpret a short answer using that context; a new unrelated topic still means NONE. For SEARCH return a concise standalone search query in the user's language, at most 500 characters. Do not answer the question, name candidates, invent URLs or return personal traits.`;
+If clarificationContext is supplied, it is a previous search by THIS author (unfinished or already answered). Interpret a short refinement using that context, preserve the topic and apply new restrictions, e.g. "Нужен именно готовый сервис, не разработчик". A new unrelated topic still means NONE. For SEARCH return a concise standalone search query in the user's language, at most 500 characters. Do not answer the question, name candidates, invent URLs or return personal traits.`;
 
 export function parseCollaborationRoute(raw:unknown):CollaborationRoute {
   const r=raw as Partial<CollaborationRoute>|null;
@@ -47,6 +47,10 @@ export async function handleGroupCollaborationQuery(input:GroupQuery):Promise<bo
       const prior=typeof key==='string'?await prisma.collaberTask.findFirst({where:{id:key,communityManagerId:input.managerId,kind:'ROUTING'}}):null;
       const p=prior?.payload as any;
       if(p?.userId===input.userId&&p.route?.kind==='CLARIFY')clarificationContext=p.text;
+      if(!clarificationContext){
+        const previous=await prisma.collaberRequest.findFirst({where:{communityManagerId:input.managerId,chatId:input.chatId,tgUserId:input.userId,telegramMessageId:input.replyToMessageId,status:'SENT',createdAt:{gte:new Date(Date.now()-86400000)}},select:{query:true}});
+        clarificationContext=previous?.query;
+      }
     }
     const route=await classifyCollaborationQuery(input.managerId,input.text,cfg.communityType,clarificationContext);
     task=await prisma.collaberTask.upsert({where:{dedupeKey},create:{communityManagerId:input.managerId,kind:'ROUTING',status:'COMPLETED',dedupeKey,payload:{userId:input.userId,text:input.text.slice(0,4000),route}},update:{}});
