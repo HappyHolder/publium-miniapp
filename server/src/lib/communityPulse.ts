@@ -7,7 +7,7 @@
  * summing daily numbers (a person active 20 days is ONE monthly active, not 20),
  * so month/quarter/year are always computed from these facts.
  *
- * Recording is fire-and-forget and never blocks or breaks message handling.
+ * Ingress callers isolate analytics failures from moderator decisions.
  */
 
 import { prisma } from '../db';
@@ -65,6 +65,37 @@ export async function communityIdForChat(tgChatId: string): Promise<string | nul
 
 const emptyHours = (): number[] => Array.from({ length: 24 }, () => 0);
 
+type PulseTelegramUser = { id: number; is_bot?: boolean; username?: string; first_name?: string; last_name?: string };
+type PulseTelegramMember = { status: string; is_member?: boolean; user: PulseTelegramUser };
+export type PulseTelegramUpdate = {
+  message?: { message_id: number; date?: number; chat: { id: number }; from?: PulseTelegramUser; sender_chat?: unknown; is_automatic_forward?: boolean; text?: string; caption?: string;
+    new_chat_members?: PulseTelegramUser[]; left_chat_member?: PulseTelegramUser; reply_to_message?: { message_id: number; from?: PulseTelegramUser } };
+  chat_member?: { chat: { id: number }; date: number; old_chat_member: PulseTelegramMember; new_chat_member: PulseTelegramMember };
+};
+export function pulseMembershipPresent(member: { status: string; is_member?: boolean }): boolean {
+  return ['member', 'administrator', 'creator'].includes(member.status) || (member.status === 'restricted' && member.is_member === true);
+}
+/** Shared ingress for Moderator and Manager; edits and service text never add volume. */
+export async function recordPulseTelegramUpdate(update: PulseTelegramUpdate, source: string): Promise<void> {
+  const change = update.chat_member, message = update.message;
+  const chatId = change?.chat.id ?? message?.chat.id;
+  if (!chatId) return;
+  const communityId = await communityIdForChat(String(chatId));
+  if (!communityId) return;
+  if (change) {
+    if (!change.new_chat_member.user.is_bot && pulseMembershipPresent(change.old_chat_member) !== pulseMembershipPresent(change.new_chat_member)) await recordPulseMembership(communityId, pulseMembershipPresent(change.new_chat_member) ? 'join' : 'leave', String(change.new_chat_member.user.id), new Date(change.date * 1000), 'chat_member');
+    return;
+  }
+  if (!message) return;
+  const at = message.date ? new Date(message.date * 1000) : new Date();
+  if (message.new_chat_members?.length) { for (const user of message.new_chat_members.filter(u => !u.is_bot)) await recordPulseMembership(communityId, 'join', String(user.id), at); return; }
+  if (message.left_chat_member) { if (!message.left_chat_member.is_bot) await recordPulseMembership(communityId, 'leave', String(message.left_chat_member.id), at); return; }
+  if (!message.from || message.from.is_bot || message.sender_chat || message.is_automatic_forward || (!message.text && !message.caption)) return;
+  await recordPulseMessage({ communityId, tgUserId: String(message.from.id), telegramMessageId: message.message_id, isReply: Boolean(message.reply_to_message),
+    replyToMessageId: message.reply_to_message?.message_id, replyToUserId: message.reply_to_message?.from ? String(message.reply_to_message.from.id) : undefined,
+    replyToBot: message.reply_to_message?.from?.is_bot, source, at, identity: { username: message.from.username, firstName: message.from.first_name, lastName: message.from.last_name } });
+}
+
 export type PulseParticipantIdentityInput = {
   username?: string | null;
   firstName?: string | null;
@@ -116,56 +147,58 @@ export async function rememberPulseParticipantIdentity(input: { communityId: str
  * GramJS personas) so every call carries `telegramMessageId` and the first
  * writer claims it — otherwise an active chat would count 2–3× per message.
  */
-export async function recordPulseMessage(input: { communityId: string; tgUserId: string; telegramMessageId: number; isReply: boolean; at?: Date; identity?: PulseParticipantIdentityInput }): Promise<void> {
+export async function recordPulseMessage(input: { communityId: string; tgUserId: string; telegramMessageId: number; isReply: boolean; replyToMessageId?: number; replyToUserId?: string; replyToBot?: boolean; source?: string; at?: Date; identity?: PulseParticipantIdentityInput }): Promise<void> {
   const at = input.at ?? new Date();
-  await rememberPulseParticipantIdentity({ communityId: input.communityId, tgUserId: input.tgUserId, identity: input.identity, at })
-    .catch(err => console.error('[pulse/identity]', input.communityId, input.tgUserId, (err as Error).message));
-
-  // Claim the message without using an expected duplicate as an exception.
-  // Moderator, CM and Community Core can observe the same Telegram message;
-  // createMany + skipDuplicates keeps the first writer and leaves production
-  // error logs for actual database failures.
-  const claim = await prisma.pulseMessageClaim.createMany({
-    data: [{ communityId: input.communityId, telegramMessageId: input.telegramMessageId }],
-    skipDuplicates: true,
-  });
-  if (claim.count === 0) return;
-
+  if (!/^\d+$/.test(input.tgUserId) || !Number.isFinite(at.getTime()) || +at > Date.now() + 60_000 || +at < Date.now() - 760 * 86_400_000) return;
+  await rememberPulseParticipantIdentity({ ...input, at }).catch(err => console.error('[pulse/identity]', (err as Error).message));
   const day = pulseDayKey(at);
-  const hour = pulseHour(at);
-
-  // Has this person ever spoken here before today? (cheap: indexed lookup)
-  const seenBefore = await prisma.communityDailyParticipant.findFirst({
-    where: { communityId: input.communityId, tgUserId: input.tgUserId, day: { not: day } },
-    select: { id: true },
-  });
-
-  await prisma.communityDailyParticipant.upsert({
-    where: { communityId_tgUserId_day: { communityId: input.communityId, tgUserId: input.tgUserId, day } },
-    create: { communityId: input.communityId, tgUserId: input.tgUserId, day, messages: 1, replies: input.isReply ? 1 : 0, firstDay: !seenBefore },
-    update: { messages: { increment: 1 }, ...(input.isReply ? { replies: { increment: 1 } } : {}) },
-  });
-
-  // Hour histogram lives on the day row; read-modify-write is fine at chat volume.
-  const stat = await prisma.communityDailyStat.findUnique({ where: { communityId_day: { communityId: input.communityId, day } }, select: { hourHistogram: true } });
-  const hours = Array.isArray(stat?.hourHistogram) ? [...(stat!.hourHistogram as number[])] : emptyHours();
-  while (hours.length < 24) hours.push(0);
-  hours[hour] = (hours[hour] ?? 0) + 1;
-  await prisma.communityDailyStat.upsert({
-    where: { communityId_day: { communityId: input.communityId, day } },
-    create: { communityId: input.communityId, day, hourHistogram: hours },
-    update: { hourHistogram: hours },
+  // Claim and counters commit together. Durable identities survive delayed retries.
+  await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.communityId}))`;
+    const persona = await tx.persona.findFirst({ where: { communityId: input.communityId, tgUserId: input.tgUserId }, select: { id: true } });
+    const inserted = await tx.pulseMessage.createMany({ data: [{
+      communityId: input.communityId, telegramMessageId: input.telegramMessageId,
+      tgUserId: input.tgUserId, sentAt: at, isReply: input.isReply,
+      replyToMessageId: input.replyToMessageId, replyToUserId: input.replyToUserId,
+      replyToBot: input.replyToBot ?? false, source: input.source ?? 'unknown', actorKind: persona ? 'PERSONA' : 'HUMAN',
+    }], skipDuplicates: true });
+    // Another observer may know the recipient missing from the first envelope.
+    if (!inserted.count) {
+      if (input.replyToUserId) await tx.pulseMessage.updateMany({ where: { communityId: input.communityId, telegramMessageId: input.telegramMessageId, replyToUserId: null }, data: { replyToUserId: input.replyToUserId, replyToBot: input.replyToBot ?? false } });
+      return;
+    }
+    const oldClaim = await tx.pulseMessageClaim.findUnique({ where: { communityId_telegramMessageId: { communityId: input.communityId, telegramMessageId: input.telegramMessageId } } });
+    if (oldClaim) return;
+    const seenBefore = await tx.communityDailyParticipant.findFirst({ where: { communityId: input.communityId, tgUserId: input.tgUserId, day: { lt: day } }, select: { id: true } });
+    await tx.communityDailyParticipant.upsert({
+      where: { communityId_tgUserId_day: { communityId: input.communityId, tgUserId: input.tgUserId, day } },
+      create: { communityId: input.communityId, tgUserId: input.tgUserId, day, messages: 1, replies: input.isReply ? 1 : 0, firstDay: !seenBefore },
+      update: { messages: { increment: 1 }, ...(input.isReply ? { replies: { increment: 1 } } : {}) },
+    });
+    const stat = await tx.communityDailyStat.findUnique({ where: { communityId_day: { communityId: input.communityId, day } }, select: { hourHistogram: true } });
+    const hours = Array.isArray(stat?.hourHistogram) ? [...stat.hourHistogram as number[]] : emptyHours();
+    const hour = pulseHour(at); hours[hour] = (hours[hour] ?? 0) + 1;
+    await tx.communityDailyStat.upsert({ where: { communityId_day: { communityId: input.communityId, day } }, create: { communityId: input.communityId, day, hourHistogram: hours }, update: { hourHistogram: hours } });
   });
 }
 
-/** Counts a join or a leave on the day it happened (leaves = churn signal). */
-export async function recordPulseMembership(communityId: string, kind: 'join' | 'leave', count = 1, at = new Date()): Promise<void> {
-  if (count <= 0) return;
+export async function recordPulseMembership(communityId: string, kind: 'join' | 'leave', tgUserId: string, at = new Date(), source = 'service'): Promise<void> {
+  if (!tgUserId || !Number.isFinite(at.getTime())) return;
   const day = pulseDayKey(at);
-  await prisma.communityDailyStat.upsert({
-    where: { communityId_day: { communityId, day } },
-    create: { communityId, day, ...(kind === 'join' ? { joins: count } : { leaves: count }) },
-    update: kind === 'join' ? { joins: { increment: count } } : { leaves: { increment: count } },
+  await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${communityId}))`;
+    const duplicate = await tx.pulseMembership.findFirst({ where: { communityId, tgUserId, kind, occurredAt: { gte: new Date(+at - 10_000), lte: new Date(+at + 10_000) } } });
+    if (duplicate) {
+      const opposite = await tx.pulseMembership.findFirst({ where: { communityId, tgUserId, kind: kind === 'join' ? 'leave' : 'join', occurredAt: { gt: new Date(Math.min(+duplicate.occurredAt, +at)), lt: new Date(Math.max(+duplicate.occurredAt, +at)) } } });
+      if (+duplicate.occurredAt === +at || (duplicate.source !== source && !opposite)) return;
+    }
+    const [previous, member] = await Promise.all([
+      tx.pulseMembership.findFirst({ where: { communityId, tgUserId }, orderBy: { occurredAt: 'asc' } }),
+      tx.communityMember.findUnique({ where: { communityId_tgUserId: { communityId, tgUserId } }, select: { joinedAt: true, joinCount: true } }),
+    ]);
+    const firstJoin = kind === 'join' && !previous && (!member?.joinedAt || Math.abs(+member.joinedAt - +at) < 60_000) && (member?.joinCount ?? 0) <= 1;
+    await tx.pulseMembership.create({ data: { communityId, tgUserId, kind, occurredAt: at, source, firstJoin } });
+    await tx.communityDailyStat.upsert({ where: { communityId_day: { communityId, day } }, create: { communityId, day, ...(kind === 'join' ? { joins: 1 } : { leaves: 1 }) }, update: kind === 'join' ? { joins: { increment: 1 } } : { leaves: { increment: 1 } } });
   });
 }
 
@@ -227,9 +260,15 @@ export async function rollupPulseDay(communityId: string, day: string): Promise<
  * yesterday, so messages landing either side of midnight are never lost), and
  * snapshots the chat's member count, which percentage metrics need.
  */
-/** Drops message claims older than 6h — they only guard against concurrent
- *  double-counting by the three sources, which all observe within seconds. */
+/** Retain two yearly comparisons plus lookback; remove obsolete v1 claims. */
 export async function purgePulseClaims(): Promise<number> {
+  const cutoff = new Date(Date.now() - 760 * 86_400_000);
+  await prisma.$transaction([
+    prisma.pulseMessage.deleteMany({ where: { sentAt: { lt: cutoff } } }),
+    prisma.pulseAssessment.deleteMany({ where: { assessedAt: { lt: cutoff } } }),
+    prisma.pulseCoverage.deleteMany({ where: { day: { lt: pulseDayKey(cutoff) } } }),
+    prisma.pulseModerationRecord.deleteMany({ where: { occurredAt: { lt: cutoff } } }),
+  ]);
   const { count } = await prisma.pulseMessageClaim.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 6 * 3_600_000) } } });
   return count;
 }
@@ -255,15 +294,18 @@ export async function rollupAllCommunities(days = 2): Promise<number> {
 async function snapshotMemberCount(communityId: string, tgChatId: string): Promise<void> {
   const { getChatMemberCount } = await import('./telegramBot');
   const { moderatorTokenForCommunity } = await import('../moderator/managedBotCrypto');
-  const token = await moderatorTokenForCommunity(communityId).catch(() => null);
+  const { communityManagerExecutor } = await import('../communityManager/managedBot');
+  const candidates = await Promise.all([moderatorTokenForCommunity(communityId).catch(() => null), communityManagerExecutor(communityId).then(e => e.token).catch(() => null)]);
+  const { observePulseCoverage } = await import('./pulseCoverage');
+  const token = await observePulseCoverage(communityId, tgChatId, candidates.filter((t): t is string => Boolean(t)));
   if (!token) return;
   const count = await getChatMemberCount(tgChatId, token);
   if (count == null) return;
   const day = pulseDayKey();
   await prisma.communityDailyStat.upsert({
     where: { communityId_day: { communityId, day } },
-    create: { communityId, day, memberCount: count },
-    update: { memberCount: count },
+    create: { communityId, day, memberCount: count, memberCountAt: new Date(), memberCountSource: 'telegram:getChatMemberCount' },
+    update: { memberCount: count, memberCountAt: new Date(), memberCountSource: 'telegram:getChatMemberCount' },
   });
 }
 
@@ -291,8 +333,8 @@ export async function seedPulseHistory(communityId: string): Promise<{ days: num
     for (const day of days) {
       const exists = await prisma.communityDailyParticipant.findUnique({ where: { communityId_tgUserId_day: { communityId, tgUserId: p.tgUserId, day } }, select: { id: true } });
       if (exists) continue;
-      // messages=1 is a floor, not a real count — the raw volume is unrecoverable.
-      await prisma.communityDailyParticipant.create({ data: { communityId, tgUserId: p.tgUserId, day, messages: 1, replies: 0, firstDay: false } }).catch(() => undefined);
+      // Only the active day is known. No synthetic message volume is created.
+      await prisma.communityDailyParticipant.create({ data: { communityId, tgUserId: p.tgUserId, day, messages: 0, replies: 0, firstDay: false, estimated: true } }).catch(() => undefined);
       facts++;
     }
   }
@@ -301,7 +343,7 @@ export async function seedPulseHistory(communityId: string): Promise<{ days: num
     await prisma.communityDailyStat.upsert({
       where: { communityId_day: { communityId, day } },
       create: { communityId, day, joins },
-      update: { joins },
+      update: {},
     }).catch(() => undefined);
   }
   for (const day of new Set([...joinsByDay.keys(), ...participants.flatMap(p => Array.isArray(p.activeDayKeys) ? (p.activeDayKeys as string[]) : [])])) {

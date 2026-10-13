@@ -722,6 +722,11 @@ model Community {
   dailyParticipants          CommunityDailyParticipant[]
   pulseParticipants          CommunityPulseParticipant[]
   dailyStats                 CommunityDailyStat[]
+  pulseMessages              PulseMessage[]
+  pulseMemberships           PulseMembership[]
+  pulseCoverage              PulseCoverage[]
+  pulseAssessments           PulseAssessment[]
+  pulseModerationRecords     PulseModerationRecord[]
 }
 
 // ─── Pulse: community analytics ────────────────────────────────────────────────
@@ -741,6 +746,7 @@ model CommunityDailyParticipant {
   messages    Int      @default(0)
   replies     Int      @default(0)
   firstDay    Boolean  @default(false) // first day this person ever spoke here
+  estimated   Boolean  @default(false) // activity-only history is not message volume
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -749,6 +755,89 @@ model CommunityDailyParticipant {
   @@unique([communityId, tgUserId, day])
   @@index([communityId, day])
   @@index([communityId, tgUserId])
+}
+
+// Pulse v2 keeps identifiers and timestamps, never message text. Retention must
+// cover two yearly windows plus the 27-day cohort/window lookback.
+model PulseMessage {
+  id                String   @id @default(cuid())
+  communityId       String
+  telegramMessageId Int
+  tgUserId          String
+  sentAt            DateTime
+  isReply           Boolean
+  replyToMessageId  Int?
+  replyToUserId     String?
+  replyToBot        Boolean  @default(false)
+  actorKind         String   @default("HUMAN")
+  source            String
+  createdAt         DateTime @default(now())
+  community         Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  @@unique([communityId, telegramMessageId])
+  @@index([communityId, sentAt])
+  @@index([communityId, tgUserId, sentAt])
+  @@index([sentAt])
+}
+
+model PulseMembership {
+  id          String   @id @default(cuid())
+  communityId String
+  tgUserId    String
+  kind        String
+  occurredAt  DateTime
+  source      String
+  firstJoin   Boolean  @default(false)
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  @@unique([communityId, tgUserId, kind, occurredAt])
+  @@index([communityId, occurredAt])
+  @@index([communityId, tgUserId, occurredAt])
+}
+
+// Heartbeats are evidence of collector availability, not evidence of activity.
+// Missing heartbeat days must never be rendered as measured zero activity.
+model PulseCoverage {
+  id          String   @id @default(cuid())
+  communityId String
+  day         String
+  firstAt     DateTime
+  lastAt      DateTime
+  maxGapMs    Int      @default(0)
+  healthy     Boolean
+  membership  Boolean
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  @@unique([communityId, day])
+  @@index([day])
+}
+
+// One completed contextual analysis and its explicit message evidence. Negative
+// decisions are retained too, so lack of violations cannot masquerade as coverage.
+model PulseAssessment {
+  id          String   @id @default(cuid())
+  communityId String
+  analysisKey String
+  assessedAt  DateTime @default(now())
+  messageIds  Json
+  evidenceIds Json
+  targetIds   Json
+  categories  Json
+  category    String
+  severity    String
+  confidence  Float
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  @@unique([communityId, analysisKey])
+  @@index([communityId, assessedAt])
+  @@index([assessedAt])
+}
+
+// Durable, text-free projection of the short-lived moderation journal.
+model PulseModerationRecord {
+  id          String   @id
+  communityId String
+  occurredAt  DateTime
+  facts       Json
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  @@index([communityId, occurredAt])
+  @@index([occurredAt])
 }
 
 // Latest public Telegram identity known to Pulse. Kept separately from daily
@@ -795,6 +884,8 @@ model CommunityDailyStat {
   leaves         Int      @default(0)
   newSpeakers    Int      @default(0) // spoke here for the very first time
   memberCount    Int? // getChatMemberCount snapshot — needed for % metrics
+  memberCountAt  DateTime?
+  memberCountSource String?
   blockedMsgs    Int      @default(0) // moderation removed them
   interventions  Int      @default(0)
   conflictEvents Int      @default(0)

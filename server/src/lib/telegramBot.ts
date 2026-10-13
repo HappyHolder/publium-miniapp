@@ -1076,8 +1076,9 @@ export async function setBotProfilePhoto(fileBytes: Buffer, token: string): Prom
   if (!body.ok) throw new TelegramApiError(body.description ?? 'setMyProfilePhoto failed', body.error_code);
 }
 
-export const setBotWebhook = (token: string, url: string, secret: string) => telegramRequest<boolean>('setWebhook', { url, secret_token: secret, allowed_updates: ['message', 'edited_message', 'callback_query', 'my_chat_member'] }, token);
+export const setBotWebhook = (token: string, url: string, secret: string) => telegramRequest<boolean>('setWebhook', { url, secret_token: secret, allowed_updates: ['message', 'edited_message', 'callback_query', 'my_chat_member', 'chat_member'] }, token);
 export const deleteBotWebhook = (token: string) => telegramRequest<boolean>('deleteWebhook', { drop_pending_updates: false }, token);
+export const getBotWebhookInfo = (token: string) => telegramRequest<{ url: string; pending_update_count: number; allowed_updates?: string[]; last_error_date?: number }>('getWebhookInfo', {}, token);
 
 /** Deletes a message sent in, or a service message from, a managed group. */
 export async function deleteBotMessage(chatId: number | string, messageId: number, token: string): Promise<void> {

@@ -20,7 +20,7 @@ import { runActivity } from './activityRuntime';
 import type { CommunityActivityType } from './activityDirector';
 import { normalizeCommunityManagerPunctuation } from './conversationStyle';
 import { canRetryJob, retryDelayMs } from './jobPolicy';
-import { recordPulseMessage } from '../lib/communityPulse';
+import { recordPulseTelegramUpdate, type PulseTelegramUpdate } from '../lib/communityPulse';
 import { markMentionedExperts, rememberCmExchange, rememberParticipant } from './participantMemory';
 import { evolvePersonalState } from './personalityState';
 import { communityManagerUpdateKey } from './conversationRouting';
@@ -33,7 +33,7 @@ import { conversationSessionKey } from './agentSession';
 
 type TgAuthor={id:number;is_bot?:boolean;username?:string;first_name?:string;last_name?:string};
 type TgMessage={message_id:number;date?:number;edit_date?:number;chat:{id:number};message_thread_id?:number;is_automatic_forward?:boolean;sender_chat?:{id:number};forward_from_message_id?:number;forward_origin?:{type?:string;chat?:{id:number};message_id?:number};from?:TgAuthor;text?:string;caption?:string;reply_to_message?:{message_id:number;date?:number;from?:TgAuthor;text?:string;caption?:string}};
-type TgUpdate={update_id:number;message?:TgMessage;edited_message?:TgMessage};
+type TgUpdate=PulseTelegramUpdate & {update_id:number;message?:TgMessage;edited_message?:TgMessage};
 type Ctx={manager:any;config:CommunityManagerConfigData;community:any};
 const contextOwnerId=(community:any):string|undefined=>community.chat?.userId??community.channel?.userId;
 const contextName=(community:any):string=>community.chat?.title??community.channel?.name??'сообщество';
@@ -52,6 +52,8 @@ async function published(chatId:string,executorType?:'SHARED'|'CUSTOM',community
 
 export async function acceptCommunityManagerUpdate(update:TgUpdate,executor:{type:'SHARED'|'CUSTOM';botId:number;communityId?:string}={type:'SHARED',botId:getBotIdFromToken(env.COMMUNITY_MANAGER_BOT_TOKEN)}){
   if(!Number.isInteger(update.update_id))return'ignored';
+  // Collect before feature routing, including membership-only updates.
+  await recordPulseTelegramUpdate(update, 'manager').catch(err => console.error('[pulse/message]', (err as Error).message));
   if(await acceptCollaberUpdate(update,executor))return'collaber';
   const m=update.message??update.edited_message,text=(m?.text??m?.caption??'').trim();
   if(!m)return'ignored';
@@ -74,7 +76,6 @@ export async function acceptCommunityManagerUpdate(update:TgUpdate,executor:{typ
   await cancelSilentContentRelease(ctx.manager.id,{replyToMessageId:m.reply_to_message?.message_id,messageThreadId:m.message_thread_id});
   // Pulse analytics: CM sees the chat even when Moderator is off. The recorder
   // claims each message id, so overlapping sources never double-count.
-  if(!update.edited_message)void recordPulseMessage({communityId:ctx.community.id,tgUserId:String(m.from.id),telegramMessageId:m.message_id,isReply:Boolean(m.reply_to_message),at:m.date?new Date(m.date*1000):new Date(),identity:{username:m.from.username,firstName:m.from.first_name,lastName:m.from.last_name}}).catch(()=>undefined);
   const reply=m.reply_to_message,replyText=(reply?.text??reply?.caption??'').trim();
   if(reply?.from&&!reply.from.is_bot){
     const tgUserId=String(reply.from.id),username=reply.from.username?.trim().replace(/^@/,'')||null,firstName=reply.from.first_name?.trim()||null,lastName=reply.from.last_name?.trim()||null,displayName=[firstName,lastName].filter(Boolean).join(' ')||username||('Participant '+tgUserId),replyAt=reply.date?new Date(reply.date*1000):new Date();

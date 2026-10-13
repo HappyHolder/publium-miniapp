@@ -59,12 +59,12 @@ async function claimMessage(communityId: string, telegramMessageId: number, pers
   } catch { return false; }
 }
 
-async function resolveAuthor(message: any): Promise<{ author: Author | null; isBot: boolean }> {
+async function resolveAuthor(message: any): Promise<{ author: Author | null; isBot: boolean; isHuman: boolean }> {
   const senderId = message?.senderId ? String(message.senderId) : null;
-  if (!senderId) return { author: null, isBot: false };
+  if (!senderId) return { author: null, isBot: false, isHuman: false };
   let sender: any = null;
   try { sender = await message.getSender(); } catch { /* entity may be uncached */ }
-  return { author: { id: senderId, username: sender?.username ?? null, firstName: sender?.firstName ?? null, lastName: sender?.lastName ?? null }, isBot: Boolean(sender?.bot) };
+  return { author: { id: senderId, username: sender?.username ?? null, firstName: sender?.firstName ?? null, lastName: sender?.lastName ?? null }, isBot: Boolean(sender?.bot), isHuman: Boolean(sender && sender.className === 'User' && !sender.bot) };
 }
 
 /** Recent chat with each speaker under a stable name, so the model never confuses people. */
@@ -100,35 +100,37 @@ async function handleMessage(personaId: string, communityId: string, chatId: str
   const message = event.message;
   const text = (message?.message ?? '').trim();
   const messageId = message?.id;
-  if (!text || typeof messageId !== 'number' || message.out) return; // ignore own/empty
-  if (!isPersonaAwake(config)) {
-    // Sleeping used to leave NO trace at all, which reads as "the persona broke".
-    // Log it, but at most once per 30 min so a busy night doesn't flood the journal.
-    const now = Date.now();
-    if (now - (asleepLoggedAt.get(personaId) ?? 0) > 30 * 60_000) {
-      asleepLoggedAt.set(personaId, now);
-      await log(personaId, 'SILENT', 'asleep — вне часов активности (' + config.presence.activeFromHour + ':00–' + config.presence.activeToHour + ':00 ' + config.presence.timezone + ')', text, null, null, messageId, null, { input: 0, output: 0 }, Date.now()).catch(() => undefined);
-    }
-    return;
-  }
+  if (!text || typeof messageId !== 'number') return;
 
   const start = Date.now();
   try {
-    const { author, isBot } = await resolveAuthor(message);
+    const { author, isBot, isHuman } = await resolveAuthor(message);
 
     // Pulse analytics: a persona's GramJS client sees every message in the chat,
-    // including when Moderator/CM are off — the third and most reliable source.
+    // including when Moderator/CM are off — an additional collection source.
     // Recorded before the bot check so human traffic is captured even when this
     // persona then stays silent; the recorder claims the message id, so the
     // moderator/CM webhooks observing the same message never double-count it.
-    if (author && !isBot) {
+    if (author && isHuman) {
       const replyToId = (message as any)?.replyTo?.replyToMsgId ?? null;
       void recordPulseMessage({
         communityId, tgUserId: author.id, telegramMessageId: messageId,
-        isReply: typeof replyToId === 'number',
+        isReply: typeof replyToId === 'number', replyToMessageId: typeof replyToId === 'number' ? replyToId : undefined, source: 'core',
         at: message.date ? new Date(message.date * 1000) : new Date(),
         identity: { username: author.username, firstName: author.firstName, lastName: author.lastName },
       }).catch(() => undefined);
+    }
+
+    if (message.out) return;
+    if (!isPersonaAwake(config)) {
+      // Sleeping used to leave NO trace at all, which reads as "the persona broke".
+      // Log it, but at most once per 30 min so a busy night doesn't flood the journal.
+      const now = Date.now();
+      if (now - (asleepLoggedAt.get(personaId) ?? 0) > 30 * 60_000) {
+        asleepLoggedAt.set(personaId, now);
+        await log(personaId, 'SILENT', 'asleep — вне часов активности (' + config.presence.activeFromHour + ':00–' + config.presence.activeToHour + ':00 ' + config.presence.timezone + ')', text, null, null, messageId, null, { input: 0, output: 0 }, Date.now()).catch(() => undefined);
+      }
+      return;
     }
 
     if (isBot) return; // never react to or argue with the CM / Moderator bots

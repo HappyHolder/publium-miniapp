@@ -21,7 +21,7 @@ import { DEFAULT_BLOCKS, parseBlocks, type AiModerationAction, type AiModeration
 import { ownerFeedbackContext } from '../moderator/feedbackContext';
 import { telegramBotPolicyViolation, telegramMessageSignals } from '../moderator/telegramMessageSignals';
 import { moderatorChannelContext } from '../moderator/chatStyleContext';
-import { communityIdForChat, recordPulseMessage, recordPulseMembership, rememberPulseParticipantIdentity, seedPulseHistory, rollupPulseDay, pulseDayKey } from '../lib/communityPulse';
+import { recordPulseTelegramUpdate, rememberPulseParticipantIdentity, seedPulseHistory, rollupPulseDay, pulseDayKey } from '../lib/communityPulse';
 import { computePulse, PULSE_BENCHMARKS } from '../lib/communityPulseMetrics';
 import { TIER_LIMITS, getEffectiveSubscription, hasCustomBotSlot } from '../lib/subscriptionLimits';
 
@@ -37,10 +37,10 @@ const normalizeBotUsername = (value: unknown) => typeof value === 'string'
 type TgAdmin = { status: string; can_delete_messages?: boolean; can_restrict_members?: boolean; can_invite_users?: boolean; can_pin_messages?: boolean };
 type TgUser = { id: number; first_name: string; last_name?: string; username?: string; is_bot?: boolean };
 type TgEntity = { type: string; offset: number; length: number; url?: string; user?: TgUser };
-type TgMessage = { message_id: number; message_thread_id?: number; chat: { id: number; title?: string; username?: string; type?: string }; from?: TgUser; text?: string; caption?: string; entities?: TgEntity[]; caption_entities?: TgEntity[]; via_bot?: TgUser; reply_markup?: { inline_keyboard?: Array<Array<{ url?: string; login_url?: { url?: string }; web_app?: { url?: string } }>> }; new_chat_members?: TgUser[]; left_chat_member?: TgUser; photo?: unknown[]; video?: unknown; document?: unknown; audio?: unknown; voice?: unknown; video_note?: unknown; sticker?: unknown; animation?: unknown; poll?: unknown; contact?: unknown; location?: unknown; forward_origin?: unknown; forward_from?: unknown; forward_from_chat?: unknown; reply_to_message?: { message_id: number; from?: TgUser } };
+type TgMessage = { message_id: number; date?: number; sender_chat?: unknown; is_automatic_forward?: boolean; message_thread_id?: number; chat: { id: number; title?: string; username?: string; type?: string }; from?: TgUser; text?: string; caption?: string; entities?: TgEntity[]; caption_entities?: TgEntity[]; via_bot?: TgUser; reply_markup?: { inline_keyboard?: Array<Array<{ url?: string; login_url?: { url?: string }; web_app?: { url?: string } }>> }; new_chat_members?: TgUser[]; left_chat_member?: TgUser; photo?: unknown[]; video?: unknown; document?: unknown; audio?: unknown; voice?: unknown; video_note?: unknown; sticker?: unknown; animation?: unknown; poll?: unknown; contact?: unknown; location?: unknown; forward_origin?: unknown; forward_from?: unknown; forward_from_chat?: unknown; reply_to_message?: { message_id: number; from?: TgUser } };
 type MyChatMemberUpdate = { chat: { id: number; title?: string; username?: string; type: string }; from?: { id: number }; new_chat_member: TgAdmin };
 type CallbackQuery = { id: string; from: TgUser; data?: string; message?: TgMessage };
-type ModeratorUpdate = { update_id: number; my_chat_member?: MyChatMemberUpdate; message?: TgMessage; edited_message?: TgMessage; callback_query?: CallbackQuery };
+type ModeratorUpdate = { update_id: number; chat_member?: { chat: { id: number }; date: number; old_chat_member: { status: string; is_member?: boolean; user: TgUser }; new_chat_member: { status: string; is_member?: boolean; user: TgUser } }; my_chat_member?: MyChatMemberUpdate; message?: TgMessage; edited_message?: TgMessage; callback_query?: CallbackQuery };
 const REQUIRED_BASE_RIGHTS = { can_delete_messages: true, can_restrict_members: true };
 const DEFAULT_WARNING_POLICY = DEFAULT_BLOCKS.find(block => block.type === 'warning_policy') as WarningPolicyBlock;
 
@@ -153,7 +153,8 @@ async function handleContentFilters(update: ModeratorUpdate, message: TgMessage,
   const duplicate = await prisma.moderationEvent.findUnique({ where: { telegramUpdateId: eventKey(update.update_id) }, select: { id: true } }); if (duplicate) { res.json({ ok: true, duplicate: true }); return true; }
   const action = match.category?.action ?? block.action;
   const audit = await prisma.moderationEvent.create({ data: { communityId: ctx.community.id, telegramUpdateId: eventKey(update.update_id), telegramMessageId: message.message_id, tgUserId: String(message.from.id), blockId: match.category?.id ?? block.id, eventType: edited ? 'CONTENT_FILTER_EDITED' : 'CONTENT_FILTER_TRIGGERED', decision: match.category?.name ?? match.reason, reason: match.reason, action: action === 'delete_warn' ? 'DELETE_WARN' : 'DELETE', status: 'RECEIVED', metadata: { detail: match.detail ?? null, categoryId: match.category?.id ?? null, categoryName: match.category?.name ?? null, edited } } });
-  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
+  let deletePending = false;
+  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { deletePending = true; await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
   let warningCount = 0, sanctionAction = 'NONE';
   if (action === 'delete_warn') {
     if (ctx.warningPolicy) {
@@ -178,7 +179,7 @@ async function handleContentFilters(update: ModeratorUpdate, message: TgMessage,
     const ref = await sendBotMessage(message.chat.id, responseText.slice(0, 1000), currentToken(), sanctionAction !== 'NONE' && message.from ? appealKeyboard(ctx.community.id, String(message.from.id)) : undefined).catch(() => null);
     if (ref?.messageId && match.category?.autoDeleteSeconds) await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: ref.messageId, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: ref.messageId, executeAt: new Date(Date.now() + match.category.autoDeleteSeconds * 1000) }, update: { executeAt: new Date(Date.now() + match.category.autoDeleteSeconds * 1000), status: 'PENDING', attempts: 0 } });
   }
-  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED', metadata: { detail: match.detail ?? null, categoryId: match.category?.id ?? null, categoryName: match.category?.name ?? null, edited, warningCount, sanctionAction } } });
+  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED', metadata: { detail: match.detail ?? null, categoryId: match.category?.id ?? null, categoryName: match.category?.name ?? null, edited, warningCount, sanctionAction, deletePending } } });
   res.json({ ok: true, moderated: true, reason: match.reason, category: match.category?.name ?? null }); return true;
 }
 const RAID_CAPTCHA: CaptchaBlock = { id: 'raid-captcha', type: 'captcha', enabled: true, text: '**{name}**, в группе включена защита от наплыва участников. Подтвердите, что вы человек.', buttonText: 'Я человек', timeoutSeconds: 300, failureAction: 'kick', deleteOnSuccess: true, skipBots: false, skipAdmins: true, skipTrusted: true };
@@ -211,7 +212,8 @@ async function handleProbation(update: ModeratorUpdate, message: TgMessage, edit
   const duplicate = await prisma.moderationEvent.findUnique({ where: { telegramUpdateId: eventKey(update.update_id) }, select: { id: true } }); if (duplicate) { res.json({ ok: true, duplicate: true }); return true; }
   const warnable = Boolean(newcomer && block?.action === 'delete_warn');
   const audit = await prisma.moderationEvent.create({ data: { communityId: ctx.community.id, telegramUpdateId: eventKey(update.update_id), telegramMessageId: message.message_id, tgUserId: String(message.from.id), blockId: newcomer ? block?.id : ctx.antiSpam?.id, eventType: newcomer ? 'PROBATION_TRIGGERED' : 'RAID_GUARD_TRIGGERED', decision: reason, reason, action: warnable ? 'DELETE_WARN' : 'DELETE', status: 'RECEIVED', metadata: { edited, raidGuard, newcomer } } });
-  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
+  let deletePending = false;
+  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { deletePending = true; await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
   let warningCount = 0, sanctionAction = 'NONE';
   if (warnable && ctx.warningPolicy) {
     const sanction = await issueWarning({ communityId: ctx.community.id, chatId: message.chat.id, tgUserId: String(message.from.id), telegramMessageId: message.message_id, reason: 'Ограничение для новых участников: ' + reason, source: 'PROBATION', eventId: audit.id, policy: ctx.warningPolicy, token: currentToken() });
@@ -225,7 +227,7 @@ async function handleProbation(update: ModeratorUpdate, message: TgMessage, edit
   const keyboard = warnable && warningCount > 0 ? appealKeyboard(ctx.community.id, String(message.from.id)) : undefined;
   const ref = await sendBotMessage(message.chat.id, notice.slice(0, 1000), currentToken(), keyboard).catch(() => null);
   if (ref?.messageId) await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: ref.messageId, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: ref.messageId, executeAt: new Date(Date.now() + 120_000) }, update: { executeAt: new Date(Date.now() + 120_000), status: 'PENDING', attempts: 0 } });
-  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED', metadata: { edited, raidGuard, newcomer, warningCount, sanctionAction } } });
+  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED', metadata: { edited, raidGuard, newcomer, warningCount, sanctionAction, deletePending } } });
   res.json({ ok: true, moderated: true, probation: true, reason }); return true;
 }
 
@@ -271,7 +273,8 @@ async function handleAntiSpam(update: ModeratorUpdate, message: TgMessage, res: 
   const audit = edited
     ? await prisma.moderationEvent.create({ data: eventData })
     : (await prisma.$transaction([prisma.moderationMessageSample.create({ data: sampleData }), prisma.moderationEvent.create({ data: eventData })]))[1];
-  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
+  let deletePending = false;
+  try { await deleteBotMessage(message.chat.id, message.message_id, currentToken()); } catch (err) { deletePending = true; await prisma.scheduledModerationAction.upsert({ where: { tgChatId_telegramMessageId_actionType: { tgChatId: String(message.chat.id), telegramMessageId: message.message_id, actionType: 'DELETE_MESSAGE' } }, create: { communityId: ctx.community.id, actionType: 'DELETE_MESSAGE', tgChatId: String(message.chat.id), telegramMessageId: message.message_id, executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) }, update: { status: 'PENDING', executeAt: new Date(Date.now() + 60_000), lastError: (err as Error).message.slice(0, 500) } }); }
   if (block.action === 'delete_warn') {
     if (ctx.warningPolicy) { const sanction = await issueWarning({ communityId: ctx.community.id, chatId: message.chat.id, tgUserId: String(message.from.id), telegramMessageId: message.message_id, reason, source: 'ANTISPAM', eventId: audit.id, policy: ctx.warningPolicy, token: currentToken() }); await prisma.moderationEvent.update({ where: { id: audit.id }, data: { action: 'DELETE_WARN_' + sanction.action } }); }
     else await prisma.moderationWarning.create({ data: { communityId: ctx.community.id, tgUserId: String(message.from.id), reason, source: 'ANTISPAM', eventId: audit.id } });
@@ -279,7 +282,7 @@ async function handleAntiSpam(update: ModeratorUpdate, message: TgMessage, res: 
     const reasonText = { VIA_BOT_BLOCKED: 'сообщения через сторонних ботов запрещены', BOT_REFERENCE_BLOCKED: 'ссылки и упоминания сторонних ботов запрещены', LINK_BLOCKED: 'ссылка запрещена', DUPLICATE: 'повтор сообщения', FLOOD: 'слишком много сообщений' }[reason];
     await sendBotMessage(message.chat.id, label + ', сообщение удалено: ' + reasonText, currentToken()).catch(() => undefined);
   }
-  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED' } });
+  await prisma.moderationEvent.update({ where: { id: audit.id }, data: { status: 'PROCESSED', metadata: { domains, botUsername: botViolation?.botUsername ?? null, viaBotId: signals.viaBotId, edited, deletePending } } });
   res.json({ ok: true, moderated: true, reason }); return true;
 }
 
@@ -555,29 +558,7 @@ async function trackRaidOnJoin(ctx: NonNullable<Awaited<ReturnType<typeof publis
  * Fire-and-forget: never blocks or fails message handling.
  */
 async function recordPulseActivity(message: TgMessage): Promise<void> {
-  const communityId = await communityIdForChat(String(message.chat.id));
-  if (!communityId) return;
-  const at = new Date();
-
-  if (message.new_chat_members?.length) {
-    await recordPulseMembership(communityId, 'join', message.new_chat_members.filter(m => !m.is_bot).length, at);
-    return;
-  }
-  if (message.left_chat_member) {
-    if (!message.left_chat_member.is_bot) await recordPulseMembership(communityId, 'leave', 1, at);
-    return;
-  }
-  // A real human message (service messages carry no from / are bots).
-  if (!message.from || message.from.is_bot) return;
-  if (!message.text && !message.caption) return;
-  await recordPulseMessage({
-    communityId,
-    tgUserId: String(message.from.id),
-    telegramMessageId: message.message_id,
-    isReply: Boolean(message.reply_to_message),
-    at,
-    identity: { username: message.from.username, firstName: message.from.first_name, lastName: message.from.last_name },
-  });
+  await recordPulseTelegramUpdate({ message }, 'moderator');
 }
 
 async function recordCommunityManagerDisposition(update: ModeratorUpdate, message: TgMessage): Promise<void> {
@@ -603,6 +584,7 @@ async function recordCommunityManagerDisposition(update: ModeratorUpdate, messag
 async function processModeratorWebhook(req: Request, res: Response): Promise<void> {
   const update = req.body as ModeratorUpdate;
   if (!Number.isInteger(update.update_id)) { res.json({ ok: true, ignored: true }); return; }
+  if (update.chat_member) await recordPulseTelegramUpdate(update, 'moderator').catch(err => console.error('[pulse/membership]', (err as Error).message));
   const dispositionMessage = update.edited_message ?? update.message;
   try {
     if (update.callback_query && await handleCallback(update, update.callback_query, res)) return;
