@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { prisma } from '../db';
-import { computePulse } from './communityPulseMetrics';
+import { computePulse } from './communityPulseMetricsV2';
 import { DAY, pulseDays, pulseKey, pulseStart } from './pulseScoring';
 
 test('report integrates score, full-day calendar, author universe and unknown history', async t => {

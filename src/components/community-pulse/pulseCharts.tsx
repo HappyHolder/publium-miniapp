@@ -21,7 +21,7 @@ export const PULSE_RAMP = ['#6B3D12', '#96500B', '#C05F04', '#E8802B', '#FFA968'
 
 const INK = '#EDEDEF'
 const INK_MUTED = '#8A8A92'
-const INK_FAINT = '#94949E'
+const INK_FAINT = '#55555D'
 const GRID = 'rgba(255,255,255,0.07)'
 
 /** Picks a ramp step for a 0..1 intensity (0 = empty cell, drawn as surface). */
@@ -52,7 +52,7 @@ export function Sparkline({ values, width = 96, height = 28, color = PULSE_COLOR
 
 // ─── Pentagon radar ───────────────────────────────────────────────────────────
 
-export interface RadarAxis { key: string; label: string; value: number | null }
+export interface RadarAxis { key: string; label: string; value: number }
 
 /**
  * A radar is a fast "where is it weak" read, but it CANNOT be read precisely —
@@ -70,7 +70,7 @@ export function PentagonRadar({ axes, size = 240, showLabels = false }: { axes: 
     return [cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius] as const
   }
   const ring = (radius: number) => Array.from({ length: n }, (_, i) => point(i, radius).join(',')).join(' ')
-  const shape = axes.map((a, i) => point(i, (Math.max(0, Math.min(100, a.value ?? 0)) / 100) * r).join(',')).join(' ')
+  const shape = axes.map((a, i) => point(i, (Math.max(0, Math.min(100, a.value)) / 100) * r).join(',')).join(' ')
 
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Радар по пяти осям">
@@ -81,10 +81,9 @@ export function PentagonRadar({ axes, size = 240, showLabels = false }: { axes: 
         const [x, y] = point(i, r)
         return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke={GRID} strokeWidth={1} />
       })}
-      {axes.every(a => a.value != null) && <polygon points={shape} fill={PULSE_COLORS[0]} fillOpacity={0.22} stroke={PULSE_COLORS[0]} strokeWidth={2} strokeLinejoin="round" />}
+      <polygon points={shape} fill={PULSE_COLORS[0]} fillOpacity={0.22} stroke={PULSE_COLORS[0]} strokeWidth={2} strokeLinejoin="round" />
       {axes.map((a, i) => {
-        if (a.value == null) return null
-        const [x, y] = point(i, (Math.max(0, Math.min(100, a.value ?? 0)) / 100) * r)
+        const [x, y] = point(i, (Math.max(0, Math.min(100, a.value)) / 100) * r)
         return <circle key={a.key} cx={x} cy={y} r={3.5} fill={PULSE_COLORS[0]} stroke="#121214" strokeWidth={2} />
       })}
       {showLabels && axes.map((a, i) => {
@@ -145,15 +144,15 @@ export function ActivityHeatmap({ matrix }: { matrix: number[][] }) {
         )}
       </svg>
       <div className="mt-1.5 flex items-center justify-between">
-        <p className="text-[10px] text-[#94949E]" aria-live="polite">
+        <p className="text-[10px] text-[#55555D]" aria-live="polite">
           {hover
             ? `${WEEKDAYS[hover.d]}, ${hover.h}:00 — ${matrix[hover.d]?.[hover.h] ?? 0} сообщ.`
             : 'Часы по Москве'}
         </p>
         <div className="flex items-center gap-1">
-          <span className="text-[9px] text-[#94949E]">меньше</span>
+          <span className="text-[9px] text-[#55555D]">меньше</span>
           {PULSE_RAMP.map(c => <span key={c} className="h-2 w-2.5 rounded-[2px]" style={{ background: c }} />)}
-          <span className="text-[9px] text-[#94949E]">больше</span>
+          <span className="text-[9px] text-[#55555D]">больше</span>
         </div>
       </div>
     </div>
@@ -164,7 +163,7 @@ export function ActivityHeatmap({ matrix }: { matrix: number[][] }) {
 
 export function StackedBar({ items }: { items: { label: string; value: number; color: string }[] }) {
   const total = items.reduce((n, i) => n + i.value, 0)
-  if (!total) return <p className="text-[12px] text-[#94949E]">Нет данных</p>
+  if (!total) return <p className="text-[12px] text-[#55555D]">Нет данных</p>
   return (
     <div>
       {/* 2px surface gaps between segments keep adjacent fills readable */}
@@ -188,10 +187,10 @@ export function StackedBar({ items }: { items: { label: string; value: number; c
 
 // ─── Diverging bars (joins up / leaves down from a zero baseline) ─────────────
 
-export function JoinLeaveChart({ series }: { series: { day: string; joins: number | null; leaves: number | null }[] }) {
+export function JoinLeaveChart({ series }: { series: { day: string; joins: number; leaves: number }[] }) {
   const [hover, setHover] = useState<number | null>(null)
   if (!series.length) return null
-  const max = Math.max(1, ...series.map(s => Math.max(s.joins ?? 0, s.leaves ?? 0)))
+  const max = Math.max(1, ...series.map(s => Math.max(s.joins, s.leaves)))
   const h = 74, mid = h / 2
   const barW = Math.max(2, Math.min(10, 320 / series.length - 2))
   const width = series.length * (barW + 2)
@@ -202,22 +201,22 @@ export function JoinLeaveChart({ series }: { series: { day: string; joins: numbe
         <line x1={0} y1={mid} x2={width} y2={mid} stroke={GRID} strokeWidth={1} />
         {series.map((s, i) => {
           const x = i * (barW + 2)
-          const up = ((s.joins ?? 0) / max) * (mid - 4)
-          const down = ((s.leaves ?? 0) / max) * (mid - 4)
+          const up = (s.joins / max) * (mid - 4)
+          const down = (s.leaves / max) * (mid - 4)
           return (
             <g key={s.day} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onTouchStart={() => setHover(i)} className="cursor-pointer">
               {/* invisible wide hit area — bigger than the mark, per interaction spec */}
               <rect x={x - 1} y={0} width={barW + 3} height={h} fill="transparent" />
-              {(s.joins ?? 0) > 0 && <rect x={x} y={mid - up} width={barW} height={up} rx={2} fill={PULSE_COLORS[2]} opacity={hover === null || hover === i ? 1 : 0.45} />}
-              {(s.leaves ?? 0) > 0 && <rect x={x} y={mid} width={barW} height={down} rx={2} fill={PULSE_COLORS[3]} opacity={hover === null || hover === i ? 1 : 0.45} />}
+              {s.joins > 0 && <rect x={x} y={mid - up} width={barW} height={up} rx={2} fill={PULSE_COLORS[2]} opacity={hover === null || hover === i ? 1 : 0.45} />}
+              {s.leaves > 0 && <rect x={x} y={mid} width={barW} height={down} rx={2} fill={PULSE_COLORS[3]} opacity={hover === null || hover === i ? 1 : 0.45} />}
             </g>
           )
         })}
       </svg>
       <div className="mt-1.5 flex items-center justify-between">
-        <p className="text-[10px] text-[#94949E]" aria-live="polite">
+        <p className="text-[10px] text-[#55555D]" aria-live="polite">
           {hover != null && series[hover]
-            ? `${series[hover]!.day.slice(5)} — +${series[hover]!.joins ?? '—'} / −${series[hover]!.leaves ?? '—'}`
+            ? `${series[hover]!.day.slice(5)} — +${series[hover]!.joins} / −${series[hover]!.leaves}`
             : 'Вверх — вступили, вниз — вышли'}
         </p>
         <div className="flex gap-3">
@@ -231,27 +230,25 @@ export function JoinLeaveChart({ series }: { series: { day: string; joins: numbe
 
 // ─── Line chart for a single series (messages per day) ────────────────────────
 
-export function TrendLine({ series, label, maxValue }: { series: { day: string; value: number | null }[]; label: string; maxValue?: number }) {
+export function TrendLine({ series, label }: { series: { day: string; value: number }[]; label: string }) {
   const [hover, setHover] = useState<number | null>(null)
   if (series.length < 2) return null
   const w = 320, h = 80, pad = 4
-  const max = maxValue ?? Math.max(1, ...series.map(s => s.value ?? 0))
+  const max = Math.max(1, ...series.map(s => s.value))
   const x = (i: number) => (i / (series.length - 1)) * w
   const y = (v: number) => h - pad - (v / max) * (h - pad * 2)
-  const line = series.map((s, i) => s.value == null ? '' : `${i === 0 || series[i - 1]?.value == null ? 'M' : 'L'}${x(i).toFixed(1)},${y(s.value).toFixed(1)}`).join(' ')
+  const line = series.map((s, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(s.value).toFixed(1)}`).join(' ')
 
   return (
     <div>
       <svg width="100%" viewBox={`0 0 ${w} ${h}`} role="img" aria-label={label} className="overflow-visible"
         onMouseLeave={() => setHover(null)}>
-
-        <text x={2} y={10} fill={INK_MUTED} fontSize={8}>{max}</text>
-        <text x={2} y={h - 1} fill={INK_MUTED} fontSize={8}>0</text>
+        <path d={`${line} L${w},${h} L0,${h} Z`} fill={PULSE_COLORS[0]} opacity={0.12} />
         <path d={line} fill="none" stroke={PULSE_COLORS[0]} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-        {hover != null && series[hover]?.value != null && (
+        {hover != null && series[hover] && (
           <g>
             <line x1={x(hover)} y1={0} x2={x(hover)} y2={h} stroke={GRID} strokeWidth={1} />
-            <circle cx={x(hover)} cy={y(series[hover]!.value!)} r={4} fill={PULSE_COLORS[0]} stroke="#121214" strokeWidth={2} />
+            <circle cx={x(hover)} cy={y(series[hover]!.value)} r={4} fill={PULSE_COLORS[0]} stroke="#121214" strokeWidth={2} />
           </g>
         )}
         {series.map((_, i) => (
@@ -259,8 +256,8 @@ export function TrendLine({ series, label, maxValue }: { series: { day: string; 
             onMouseEnter={() => setHover(i)} onTouchStart={() => setHover(i)} className="cursor-pointer" />
         ))}
       </svg>
-      <p className="mt-1 text-[10px] text-[#94949E]" aria-live="polite">
-        {hover != null && series[hover] ? `${series[hover]!.day.slice(5)} — ${series[hover]!.value ?? 'нет данных'}` : label}
+      <p className="mt-1 text-[10px] text-[#55555D]" aria-live="polite">
+        {hover != null && series[hover] ? `${series[hover]!.day.slice(5)} — ${series[hover]!.value}` : label}
       </p>
     </div>
   )
@@ -269,13 +266,13 @@ export function TrendLine({ series, label, maxValue }: { series: { day: string; 
 // ─── Ranked horizontal bars (top participants) ────────────────────────────────
 
 export function RankedBars({ items }: { items: { key?: string; label: string; value: number; hint?: string; href?: string }[] }) {
-  if (!items.length) return <p className="text-[12px] text-[#94949E]">Нет данных</p>
+  if (!items.length) return <p className="text-[12px] text-[#55555D]">Нет данных</p>
   const max = Math.max(...items.map(i => i.value), 1)
   return (
     <div className="space-y-1.5">
       {items.map((item, i) => (
         <div key={item.key ?? item.label} className="flex min-h-11 items-center gap-2">
-          <span className="w-4 shrink-0 text-right text-[10px] tabular-nums text-[#94949E]">{i + 1}</span>
+          <span className="w-4 shrink-0 text-right text-[10px] tabular-nums text-[#55555D]">{i + 1}</span>
           {item.href ? (
             <a href={item.href} target="_blank" rel="noopener noreferrer" title={item.label} aria-label={`Открыть ${item.label} в Telegram`} className="flex min-h-11 w-[100px] shrink-0 items-center truncate rounded-sm text-[11px] font-medium text-[#D4D4D8] underline decoration-white/20 underline-offset-2 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6A00]">
               {item.label}
@@ -287,7 +284,7 @@ export function RankedBars({ items }: { items: { key?: string; label: string; va
             <div className="h-full rounded-full" style={{ width: `${(item.value / max) * 100}%`, background: i === 0 ? PULSE_COLORS[0] : 'rgba(227,98,7,0.55)' }} />
           </div>
           <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-[#EDEDEF]">{item.value}</span>
-          {item.hint && <span className="w-9 shrink-0 text-right text-[10px] tabular-nums text-[#94949E]">{item.hint}</span>}
+          {item.hint && <span className="w-9 shrink-0 text-right text-[10px] tabular-nums text-[#55555D]">{item.hint}</span>}
         </div>
       ))}
     </div>
@@ -296,17 +293,17 @@ export function RankedBars({ items }: { items: { key?: string; label: string; va
 
 // ─── Cohort retention grid ────────────────────────────────────────────────────
 
-export function CohortGrid({ cohorts }: { cohorts: { cohort: string; size: number; retention: (number | null)[]; counts?: (number | null)[] }[] }) {
-  if (!cohorts.length) return <p className="text-[12px] text-[#94949E]">Пока нет когорт — нужны данные хотя бы за неделю</p>
+export function CohortGrid({ cohorts }: { cohorts: { cohort: string; size: number; retention: number[] }[] }) {
+  if (!cohorts.length) return <p className="text-[12px] text-[#55555D]">Пока нет когорт — нужны данные хотя бы за неделю</p>
   const weeks = Math.max(...cohorts.map(c => c.retention.length))
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-separate border-spacing-[2px] text-[10px]">
         <thead>
           <tr>
-            <th className="text-left font-normal text-[#94949E]">Неделя</th>
-            <th className="font-normal text-[#94949E]">Чел.</th>
-            {Array.from({ length: weeks }, (_, w) => <th key={w} className="font-normal text-[#94949E]">{w + 1} нед.</th>)}
+            <th className="text-left font-normal text-[#55555D]">Неделя</th>
+            <th className="font-normal text-[#55555D]">Чел.</th>
+            {Array.from({ length: weeks }, (_, w) => <th key={w} className="font-normal text-[#55555D]">Н{w}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -317,9 +314,9 @@ export function CohortGrid({ cohorts }: { cohorts: { cohort: string; size: numbe
               {Array.from({ length: weeks }, (_, w) => {
                 const v = c.retention[w]
                 return (
-                  <td key={w} title={v == null ? 'Окно ещё не завершено или наблюдение неполное' : `${c.counts?.[w] ?? Math.round(v * c.size / 100)} из ${c.size}`} className="h-6 min-w-[26px] rounded-[3px] text-center tabular-nums"
+                  <td key={w} className="h-6 min-w-[26px] rounded-[3px] text-center tabular-nums"
                     style={{ background: v == null ? 'transparent' : rampStep(v / 100), color: v != null && v > 50 ? '#121214' : INK_MUTED }}>
-                    {v == null ? '—' : `${Math.round(v)}%`}
+                    {v == null ? '' : `${Math.round(v)}`}
                   </td>
                 )
               })}
@@ -327,7 +324,7 @@ export function CohortGrid({ cohorts }: { cohorts: { cohort: string; size: numbe
           ))}
         </tbody>
       </table>
-      <p className="mt-1 text-[10px] text-[#94949E]">7-дневные окна после личного вступления. — окно не созрело или нет полного наблюдения.</p>
+      <p className="mt-1 text-[10px] text-[#55555D]">% участников когорты, писавших в эту неделю</p>
     </div>
   )
 }

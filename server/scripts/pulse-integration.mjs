@@ -5,7 +5,8 @@ if (!new URL(process.env.DATABASE_URL ?? '').pathname.startsWith('/publium_audit
 const require = createRequire(import.meta.url);
 const { prisma } = require('../dist/db.js');
 const { recordPulseMessage, recordPulseMembership, pulseDayKey, rollupPulseDay } = require('../dist/lib/communityPulse.js');
-const { computePulse } = require('../dist/lib/communityPulseMetrics.js');
+const { computePulse } = require('../dist/lib/communityPulseMetricsV2.js');
+const { computePulse: computeHistoricalPulse } = require('../dist/lib/communityPulseMetrics.js');
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => { throw new Error('Unexpected network access in Pulse integration'); };
 let community;
@@ -45,6 +46,12 @@ try {
   const report = await computePulse(communityId, 30);
   assert.equal(report.headline.messages, 2); assert.equal(report.score, null);
   assert.equal(report.model.status, 'insufficient');
+  const historical = await computeHistoricalPulse(communityId, 30);
+  assert.equal(historical.headline.messages, 2);
+  assert.equal(typeof historical.score, 'number');
+  assert.equal(Object.values(historical.axes).filter(Number.isFinite).length, 5);
+  assert.equal(historical.heatmap.flat().reduce((a, b) => a + b, 0), 2);
+  console.log('PASS public report retains historical score, all five axes and heatmap without v2 coverage');
   console.log('PASS PostgreSQL membership deduplication, real rejoin and report with unverified history');
 } finally {
   if (community) await prisma.community.delete({ where: { id: community.id } });

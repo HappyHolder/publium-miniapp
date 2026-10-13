@@ -11,7 +11,7 @@ const fixture = JSON.parse(readFileSync(join(out, 'report-fixture.json'), 'utf8'
 writeFileSync(join(out, 'ui-harness.html'), `<!doctype html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module">
 import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {PulseTab} from '/src/components/community-pulse/PulseTab.tsx';
+import {PulseTabV2 as PulseTab} from '/src/components/community-pulse/PulseTabV2.tsx';
 import '/src/styles/globals.css';
 window.Telegram={WebApp:{initData:'pulse-local-fixture'}};
 createRoot(document.getElementById('root')).render(React.createElement(PulseTab,{communityId:'fixture'}));
