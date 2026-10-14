@@ -77,13 +77,25 @@ test('boolean replies without recipient metadata cannot create a dialogue score'
   const input = fixture(); input.messages = input.messages.map(m => ({ ...m, replyToUserId: null }));
   assert.equal(calculatePulseWindow(input).axes.engagement, null);
 });
-test('personas are excluded from author-days and reply graph', () => {
+test('explicit audience filter excludes selected accounts from author-days', () => {
   const input = fixture(); input.excludedIds = ['1', '2'];
   assert.equal(calculatePulseWindow(input).details.activity.metrics[0]!.numerator, 30 * 14);
 });
 test('disabled analysis is not excellent climate', () => {
   const input = fixture(); input.assessments = [];
   assert.equal(calculatePulseWindow(input).axes.climate, null);
+});
+
+test('reciprocity counts participants in mutual pairs, not the proportion of edges', () => {
+  const input = fixture();
+  let id=0;
+  input.messages = pulseDays('2026-08-01','2026-10-10').flatMap(day => [
+    ['a','b'],['b','a'],['a','c'],['c','d'],['d','c'],
+  ].map(([author,to])=>({telegramMessageId:++id,tgUserId:author!,sentAt:new Date(pulseStart(day)+3600000),isReply:true,replyToMessageId:null,replyToUserId:to!,replyToBot:false})));
+  // Four of five edges are reciprocal, but all four people have a mutual pair.
+  const metric=calculatePulseWindow(input).details.engagement.metrics[2]!;
+  assert.equal(metric.value,100);
+  assert.equal(metric.numerator,metric.denominator);
 });
 test('incomplete analysis categories cannot certify climate', () => {
   const input = fixture(); input.assessments[0]!.categories = ['toxicity'];

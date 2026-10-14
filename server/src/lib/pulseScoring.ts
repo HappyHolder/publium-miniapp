@@ -143,7 +143,7 @@ export function calculatePulseWindow(input: PulseScoringInput) {
   const repeat = repeatDenominator ? repeatNumerator / repeatDenominator : 0;
   const participation = memberDays ? authorDays / memberDays * 100 : null;
   if (participation != null && weekly.length) axes.activity = meanPulse([scalePulse('dailyParticipation', participation), scalePulse('repeatDays7', repeat)]);
-  details.activity = { formula: 'Среднее баллов ежедневного участия и повторных дней общения за неделю.', reason: memberDays ? 'Численность включает весь состав группы; авторы — люди без ботов и личностей Ядра.' : 'Нет ежедневных снимков численности. Последний снимок не подменяет весь период.', preliminary: weekly.length < scoredDays, metrics: [
+  details.activity = { formula: 'Среднее баллов ежедневного участия и повторных дней общения за неделю.', reason: memberDays ? 'Численность включает весь состав группы; авторы соответствуют указанной аудитории отчёта.' : 'Нет ежедневных снимков численности. Последний снимок не подменяет весь период.', preliminary: weekly.length < scoredDays, metrics: [
     { label: 'Участие в день', value: participation, unit: '%', numerator: authorDays, denominator: memberDays ?? undefined, explanation: 'Человеко-дни авторов / сумма ежедневной численности группы.' },
     { label: 'Повторные дни за неделю', value: repeat, unit: 'дн.', numerator: repeatNumerator, denominator: repeatDenominator, explanation: 'Сколько дней после первого автор пишет в скользящем окне 7 дней; окна без полного наблюдения исключены.' },
   ] };
@@ -153,20 +153,22 @@ export function calculatePulseWindow(input: PulseScoringInput) {
   const replies = cur.filter(m => m.isReply), unknownReplies = replies.filter(m => !m.replyToBot && !recipient(m)).length;
   const peerReplies = cur.filter(m => peer(m)).length;
   const replyShare = cur.length ? 100 * peerReplies / cur.length : 0;
-  let dialogNumerator = 0, dialogDenominator = 0, mutual = 0, directed = 0;
+  let dialogNumerator = 0, dialogDenominator = 0, mutualAuthors = 0;
   for (const w of weekly) {
     const ids = authors(w.rows), involved = new Set<string>(), edges = new Map<string, Set<string>>();
     for (const m of w.rows) { const to = peer(m); if (!to) continue; involved.add(m.tgUserId); if (ids.has(to)) involved.add(to); if (!edges.has(m.tgUserId)) edges.set(m.tgUserId, new Set()); edges.get(m.tgUserId)!.add(to); }
     dialogNumerator += involved.size; dialogDenominator += ids.size;
-    for (const [a, targets] of edges) for (const b of targets) { directed++; if (edges.get(b)?.has(a)) mutual++; }
+    const mutual = new Set<string>();
+    for (const [a, targets] of edges) for (const b of targets) if (edges.get(b)?.has(a)) { mutual.add(a); mutual.add(b); }
+    mutualAuthors += mutual.size;
   }
   const breadth = dialogDenominator ? 100 * dialogNumerator / dialogDenominator : 0;
-  const reciprocity = directed ? 100 * mutual / directed : 0;
+  const reciprocity = dialogNumerator ? 100 * mutualAuthors / dialogNumerator : 0;
   if ((!replies.length || unknownReplies < replies.length) && weekly.length) axes.engagement = meanPulse([scalePulse('replyShare', replyShare), scalePulse('dialogueBreadth', breadth), scalePulse('reciprocity', reciprocity)]);
-  details.engagement = { formula: 'Среднее баллов ответов людям, широты диалога и взаимности за 7 дней.', reason: unknownReplies ? `У ${unknownReplies} ответов неизвестен адресат; они не объявлены диалогом.` : 'Ответы себе, ботам и личностям Ядра исключены из диалога.', preliminary: weekly.length < scoredDays || (replies.length > 0 && unknownReplies / replies.length > .05), metrics: [
-    { label: 'Ответы людям', value: axes.engagement == null ? null : replyShare, unit: '%', numerator: peerReplies, denominator: cur.length, explanation: 'Сообщения с известным другим человеком-адресатом / все сообщения людей.' },
+  details.engagement = { formula: 'Среднее баллов ответов участникам, широты диалога и взаимности за 7 дней.', reason: unknownReplies ? `У ${unknownReplies} ответов неизвестен адресат; они не объявлены диалогом.` : 'Ответы себе, Telegram-ботам и аккаунтам вне выбранной аудитории исключены из диалога.', preliminary: weekly.length < scoredDays || (replies.length > 0 && unknownReplies / replies.length > .05), metrics: [
+    { label: 'Ответы участникам', value: axes.engagement == null ? null : replyShare, unit: '%', numerator: peerReplies, denominator: cur.length, explanation: 'Сообщения с известным другим участником-адресатом / все сообщения учитываемой аудитории.' },
     { label: 'Широта диалога', value: breadth, unit: '%', numerator: dialogNumerator, denominator: dialogDenominator, explanation: 'Авторы, отправившие или получившие ответ, среди авторов недельных окон.' },
-    { label: 'Взаимность', value: reciprocity, unit: '%', numerator: mutual, denominator: directed, explanation: 'Направленные связи, у которых есть обратный ответ, / все направленные связи за 7 дней.' },
+    { label: 'Взаимность', value: reciprocity, unit: '%', numerator: mutualAuthors, denominator: dialogNumerator, explanation: 'Участники хотя бы одной взаимной пары / участники зафиксированного диалога; суммы по недельным окнам.' },
   ] };
 
   const invalid = new Set(input.invalidAnalysisKeys ?? []), currentIds = new Set(cur.map(m => m.telegramMessageId));

@@ -142,8 +142,7 @@ function compositeScore(axes: PulseReport['axes']): number {
  * `days` = 30 / 90 / 365 gives month / quarter / year — all computed from the
  * same fact table, so the numbers are correct for any window.
  */
-export async function computePulse(communityId: string, days = 30): Promise<PulseReport> {
-  const now = new Date();
+export async function computePulse(communityId: string, days = 30, now = new Date()): Promise<PulseReport> {
   const to = pulseDayKey(now);
   const from = pulseDayKey(new Date(now.getTime() - (days - 1) * DAY_MS));
   const prevTo = pulseDayKey(new Date(now.getTime() - days * DAY_MS));

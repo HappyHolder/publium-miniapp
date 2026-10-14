@@ -7,6 +7,7 @@ const { prisma } = require('../dist/db.js');
 const { recordPulseMessage, recordPulseMembership, pulseDayKey, rollupPulseDay } = require('../dist/lib/communityPulse.js');
 const { computePulse } = require('../dist/lib/communityPulseMetricsV2.js');
 const { computePulse: computeHistoricalPulse } = require('../dist/lib/communityPulseMetrics.js');
+const { computeCompatiblePulse } = require('../dist/lib/pulseTransition.js');
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => { throw new Error('Unexpected network access in Pulse integration'); };
 let community;
@@ -52,6 +53,16 @@ try {
   assert.equal(Object.values(historical.axes).filter(Number.isFinite).length, 5);
   assert.equal(historical.heatmap.flat().reduce((a, b) => a + b, 0), 2);
   console.log('PASS public report retains historical score, all five axes and heatmap without v2 coverage');
+  const fixedNow = new Date();
+  for (const days of [7, 30, 90, 365]) {
+    const old = await computeHistoricalPulse(communityId, days, fixedNow);
+    const { transition, ...compatible } = await computeCompatiblePulse(communityId, days, fixedNow);
+    assert.deepEqual(compatible, old, `legacy contract ${days} days`);
+    assert.equal(transition.status, 'ready');
+    assert.equal(transition.primary, 'legacy');
+    assert.equal(transition.model.score, null);
+  }
+  console.log('PASS real read-only transition, four periods, unchanged legacy contract and no fabricated v2 score');
   console.log('PASS PostgreSQL membership deduplication, real rejoin and report with unverified history');
 } finally {
   if (community) await prisma.community.delete({ where: { id: community.id } });

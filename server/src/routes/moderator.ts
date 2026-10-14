@@ -22,7 +22,8 @@ import { ownerFeedbackContext } from '../moderator/feedbackContext';
 import { telegramBotPolicyViolation, telegramMessageSignals } from '../moderator/telegramMessageSignals';
 import { moderatorChannelContext } from '../moderator/chatStyleContext';
 import { recordPulseTelegramUpdate, rememberPulseParticipantIdentity, seedPulseHistory, rollupPulseDay, pulseDayKey } from '../lib/communityPulse';
-import { computePulse, PULSE_BENCHMARKS } from '../lib/communityPulseMetrics';
+import { PULSE_BENCHMARKS } from '../lib/communityPulseMetrics';
+import { computeCompatiblePulse as computePulse } from '../lib/pulseTransition';
 import { TIER_LIMITS, getEffectiveSubscription, hasCustomBotSlot } from '../lib/subscriptionLimits';
 
 const router = Router();

@@ -31,7 +31,10 @@ export async function computePulse(communityId: string, days = 30, now = new Dat
   await archivePulseModeration(events);
   const archived = await prisma.pulseModerationRecord.findMany({ where: { communityId, occurredAt: { gte: startAt } } });
   const invalidAnalysisKeys = archived.flatMap(e => { const f = e.facts as unknown as PulseModerationFacts; return f.invalid ? [f.analysisKey] : []; });
-  const excludedIds = [...new Set([...personas.flatMap(p => p.tgUserId ? [p.tgUserId] : []), ...messages.filter(m => m.actorKind === 'PERSONA').map(m => m.tgUserId)])], excluded = new Set(excludedIds);
+  const personaIds = new Set([...personas.flatMap(p => p.tgUserId ? [p.tgUserId] : []), ...messages.filter(m => m.actorKind === 'PERSONA').map(m => m.tgUserId)]);
+  // The documented overall audience includes managed personas. A human-only slice
+  // must be explicitly selected and must not silently replace the overall index.
+  const excludedIds: string[] = [], excluded = new Set(excludedIds);
   const common = { messages, memberships, coverage, snapshots: stats, assessments, excludedIds, invalidAnalysisKeys };
   const model = calculatePulseWindow({ ...common, from, to });
   const previous = calculatePulseWindow({ ...common, from: prevFrom, to: prevTo });
@@ -56,6 +59,7 @@ export async function computePulse(communityId: string, days = 30, now = new Dat
   }
   const users = [...perUser.values()].sort((a, b) => b.messages - a.messages);
   const totalMessages = users.reduce((s, u) => s + u.messages, 0), totalAuthorDays = users.reduce((s, u) => s + u.activeDays, 0);
+  const personaMessages = humanFacts.filter(f => personaIds.has(f.tgUserId)).reduce((s,f) => s + f.messages,0);
   const fullObserved = pulseDays(from, to).every(d => isPulseDayObserved(coverageByDay.get(d)));
   const latestSnapshot = [...stats].reverse().find(s => s.memberCount != null);
   const memberCount = latestSnapshot?.memberCount ?? null;
@@ -126,7 +130,7 @@ export async function computePulse(communityId: string, days = 30, now = new Dat
     period: { from, to, days, daysWithData: new Set(humanFacts.map(f => f.day)).size, observedDays },
     score: model.score, scoreDelta, axes: model.axes, model: { ...model, deltaContributions,
       comparisonReason: comparable ? 'Предыдущий равный период, та же модель и все пять осей.' : 'Дельта появится при двух полных сопоставимых периодах с пятью оценёнными осями.',
-      population: 'Текст и подписи людей; боты, сообщения от имени каналов и известные личности Ядра исключены.',
+      population: `Текст и подписи участников, включая аккаунты Ядра. На известные аккаунты Ядра приходится ${personaMessages} из ${totalMessages} сообщений. Telegram-боты и сообщения от имени каналов не входят. Старые неразмеченные аккаунты могут быть не распознаны.`,
       coverageNote: 'Полнота проверяется каждые 30 минут по доступности webhook и правам бота. Это контроль сбора, а не гарантия доставки Telegram.',
     }, scoreSeries,
     headline: {
