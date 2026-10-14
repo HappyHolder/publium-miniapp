@@ -43,25 +43,42 @@ try {
   await open();
   assert.equal(await page.$eval('[data-testid="pulse-score"]',e=>e.textContent),'84');
   const text=await page.evaluate(()=>document.body.innerText);
-  assert.ok(text.includes('По накопленной истории'));assert.ok(text.includes('Что удалось пересчитать из истории'));
-  assert.ok(text.includes('Удержание когорт'));assert.ok(text.includes('Когда чат живой'));
+  assert.ok(text.includes('Ориентировочная оценка за период'));
+  assert.ok(text.includes('Возвращение новичков'));assert.ok(text.includes('Когда чат живой'));
   assert.ok(!text.includes('395.2%'));assert.ok(!text.includes('норма <5%'));assert.ok(!text.includes('Наблюдатели'));
-  assert.equal(await page.$$eval('[data-testid^="pulse-v2-"]',els=>els.filter(e=>e.tagName==='DETAILS').length),5);
+  for(const phrase of ['v2','прежняя методика','Что удалось пересчитать','Новая модель','непрерывного интервала'])assert.ok(!text.includes(phrase),phrase);
+  assert.equal(await page.$('[data-testid="pulse-transition"]'),null);
+  assert.equal(await page.$$('details[open]').then(els=>els.length),0);
+  const tiles=await page.$$eval('[data-testid="pulse-stat"]',els=>els.map(e=>e.innerText));
+  assert.equal(tiles.length,10);
+  assert.ok(tiles[0].includes(String(fixture.headline.memberCount)));
+  assert.ok(tiles[1].includes(String(fixture.headline.mau)));
+  assert.ok(tiles[2].includes(String(fixture.headline.messages)));
+  assert.ok(tiles[5].includes('Данные могут быть неполными'));
+  assert.ok(tiles.every(t=>t.length<90),'metric cards must stay concise');
+  assert.ok(!text.includes('Telegram не сообщает'));
+  const toggle=label=>page.evaluate(label=>[...document.querySelectorAll('summary')].find(e=>e.textContent===label)?.click(),label);
+  await toggle('О показателях');assert.ok(await page.evaluate(()=>document.body.innerText.includes('Telegram не сообщает')));await toggle('О показателях');
+  await toggle('Как считается Пульс');assert.ok(await page.evaluate(()=>document.body.innerText.includes('округлённое среднее пяти осей')));await toggle('Как считается Пульс');
   for(const width of [320,390,768]){await page.setViewport({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,`overflow ${width}`)}
   await page.setViewport({width:390,height:844});
-  await page.screenshot({path:`${out}/pulse-compatible-history.png`,fullPage:true});
+  await page.screenshot({path:`${out}/pulse-clean-history.png`,fullPage:true});
+  await page.evaluate(()=>scrollTo(0,0));
+  await page.screenshot({path:`${out}/pulse-clean-top.png`});
+  await page.evaluate(()=>[...document.querySelectorAll('h3')].find(e=>e.textContent==='Ключевые показатели')?.scrollIntoView());
+  await page.screenshot({path:`${out}/pulse-clean-metrics.png`});
   const clickPeriod=label=>page.evaluate(label=>[...document.querySelectorAll('[role="tab"]')].find(e=>e.textContent===label)?.click(),label);
   await clickPeriod('Неделя');await sleep(100);await clickPeriod('Месяц');await sleep(950);
   assert.equal(await page.$eval('[data-testid="pulse-score"]',e=>e.textContent),'84');
   for(const next of ['partial','complete','unavailable','old-api']){
     mode=next;await open();assert.equal(await page.$eval('[data-testid="pulse-score"]',e=>e.textContent),'84');
-    assert.ok(await page.evaluate(()=>document.body.innerText.includes('Удержание когорт')));
-    if(next==='partial'||next==='complete')assert.equal(await page.$eval('[data-testid="pulse-v2-score"]',e=>e.textContent),'63');
-    else assert.equal(await page.$('[data-testid="pulse-v2-score"]'),null);
+    assert.ok(await page.evaluate(()=>document.body.innerText.includes('Возвращение новичков')));
+    assert.equal(await page.$('[data-testid="pulse-v2-score"]'),null);
+    assert.ok(!await page.evaluate(()=>document.body.innerText.includes('v2')));
   }
   mode='error';await clickPeriod('Год');await page.waitForSelector('[role="alert"]');assert.equal(await page.$('[data-testid="pulse-score"]'),null);
   mode='history';await page.evaluate(()=>[...document.querySelectorAll('button')].find(e=>e.textContent.includes('Повторить'))?.click());await page.waitForSelector('[data-testid="pulse-score"]');
   assert.equal(await page.$eval('[data-testid="pulse-score"]',e=>e.textContent),'84');
   assert.deepEqual(errors,[]);
-  console.log('Compatible Pulse UI passed: history-only, partial/full v2, preview failure, old API, 320/390/768px, stale responses and retry.');
+  console.log('Clean Pulse UI passed: one score, preserved history, concise metrics, collapsed explanations, all transition states, 320/390/768px, stale responses and retry.');
 } finally {await browser?.close();server.kill()}
