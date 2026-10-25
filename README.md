@@ -110,3 +110,5 @@ Payments use TON only. See [deployment](deploy/README.md) and [remediation repor
 ## Moderator update (2026-10-25)
 
 Profanity handling and interpersonal conduct have independent settings, notices and sanction counters. The journal shows source messages and Russian labels. See [implementation and validation](docs/moderator-implementation-2026-10-25.md), [user guide](docs/support/03-community-manager-and-moderator.md#ai-модерация-и-вмешательства), and [deployment procedure](deploy/README.md).
+
+Moderator uses a separate model override: production is on `gpt-6.1-sol`, while other AI roles stay on `gpt-5.6-terra`. See [model migration checks](docs/moderator-sol-2026-10-25.md).
