@@ -3,6 +3,7 @@ import { openAiText, openAiTextResult, type OpenAiUsage } from './openaiChat';
 
 export type TerraEffort = 'low' | 'medium' | 'high';
 export interface TerraTextParams {
+  model?: string;
   system: string;
   prompt: string;
   maxTokens?: number;
@@ -31,6 +32,7 @@ export const primaryTextModelConfigured = (): boolean => Boolean(env.OPENAI_API_
 export async function terraText(p: TerraTextParams): Promise<string | null> {
   if (!env.OPENAI_API_KEY) return null;
   const direct = await openAiText({
+    model: p.model,
     system: p.system,
     prompt: p.prompt,
     effort: p.effort ?? 'low',
@@ -65,6 +67,7 @@ export async function terraStructured<T>(p: TerraTextParams & {
 }): Promise<{ value: T; usage: OpenAiUsage } | null> {
   if (!env.OPENAI_API_KEY) return null;
   const result = await openAiTextResult({
+    model: p.model,
     system: p.system,
     prompt: p.prompt,
     effort: p.effort ?? 'low',

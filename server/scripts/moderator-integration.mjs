@@ -17,6 +17,7 @@ const express = require('express');
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (url,...args) => { if(String(url).startsWith('http://127.0.0.1:'))return originalFetch(url,...args); throw Error('External network blocked in moderator test') };
 env.MODERATOR_BOT_TOKEN='200:fixture'; env.MODERATOR_WEBHOOK_SECRET='test-secret';
+env.OPENAI_MODERATOR_MODEL='gpt-6.1-sol';
 const tag=randomUUID(),updateBase=Date.now()%1_000_000_000; let user,httpServer,seq=1000,chatSeq=Date.now();const chatIds=[];
 const deliveries=[],deletions=[],restrictions=[],bans=[],unbans=[],roles=new Map();
 let mode='conduct', modelCalls=0, selectedId=null, blockModel=null, noticeFails=false;
@@ -28,6 +29,7 @@ telegram.restrictChatUser=async(chat,id,restricted,token,until)=>{restrictions.p
 telegram.banChatUser=async(chat,id)=>{bans.push(String(id))};
 telegram.unbanChatUser=async(chat,id)=>{unbans.push(String(id))};
 model.terraStructured=async p=>{
+ assert.equal(p.model,'gpt-6.1-sol','every moderator stage must use its own model');
  modelCalls++;
  if(p.schemaName==='telegram_conduct_repeat_verification')return {value:{confirmed:true},usage:{inputTokens:10,outputTokens:5}};
  if(p.schemaName==='telegram_profanity_decision')return {value:{violation:true,confidence:.99,reason:'Мат',suggestedRewrite:mode==='rewrite'?'Почему это снова не работает?':mode==='unsafe-rewrite'?'Я тебе лицо набью':null,matchedTerms:mode==='allowed'?['хер']:['блять'],safeToRepublish:mode!=='unsafe-rewrite'},usage:{inputTokens:10,outputTokens:10}};

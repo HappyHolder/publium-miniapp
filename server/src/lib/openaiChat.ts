@@ -57,6 +57,7 @@ export interface RunOpenAiChatOpts {
 }
 
 export interface OpenAiTextParams {
+  model?: string;
   system: string;
   prompt: string;
   effort?: 'low' | 'medium' | 'high';
@@ -100,7 +101,7 @@ async function textOnce(p: OpenAiTextParams, deadline: number): Promise<{ result
       signal: controller.signal,
       headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: env.OPENAI_CHAT_MODEL,
+        model: p.model ?? env.OPENAI_CHAT_MODEL,
         instructions: p.system,
         input: [{ role: 'user', content: p.prompt }],
         reasoning: { effort: p.effort ?? 'low' },

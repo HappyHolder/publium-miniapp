@@ -57,8 +57,8 @@ export const env = {
   DEEPSEEK_API_KEY:  process.env['DEEPSEEK_API_KEY']  ?? '',
   DEEPSEEK_BASE_URL: process.env['DEEPSEEK_BASE_URL'] ?? 'https://api.deepseek.com',
   DEEPSEEK_MODEL:    process.env['DEEPSEEK_MODEL']    ?? 'deepseek-chat',
-  // CM_TEXT_MODEL is gone: Moderator, Community Manager and Community Core all
-  // run on OPENAI_CHAT_MODEL through terraText now, with no per-role override.
+  // Community Manager and Community Core use OPENAI_CHAT_MODEL. Moderator can
+  // select its own model through OPENAI_MODERATOR_MODEL.
   // LAYOUT_PROVIDER / LAYOUT_MODEL are gone: the layout pass (richPostGenerator),
   // the image and carousel planners and the visual brief all run on
   // OPENAI_CHAT_MODEL through terraText now.
@@ -78,6 +78,7 @@ export const env = {
   // the only model that renders 1:4 / 4:1 / 1:8 / 8:1 in a single pass).
   OPENAI_API_KEY:                    process.env['OPENAI_API_KEY']                    ?? '',
   OPENAI_CHAT_MODEL:                 process.env['OPENAI_CHAT_MODEL']                 ?? 'gpt-5.6-terra',
+  OPENAI_MODERATOR_MODEL:            process.env['OPENAI_MODERATOR_MODEL']?.trim() || process.env['OPENAI_CHAT_MODEL'] || 'gpt-5.6-terra',
   // Reads photos sent to the bot and brand reference images (visionExtractor).
   // Default = the same model we used to rent through Replicate.
   OPENAI_VISION_MODEL:               process.env['OPENAI_VISION_MODEL']               ?? 'gpt-4o-mini',

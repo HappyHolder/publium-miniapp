@@ -8,12 +8,12 @@ import { env } from '../env';
 import { verifyModeratorSession } from '../lib/moderatorSession';
 import { answerBotCallback, banChatUser, buildInlineKeyboard, deleteBotMessage, deleteBotWebhook, getBotIdFromToken, getBotIdentity, getChatAdministrators, getChatMember, getChatMemberCount, getManagedBotToken, kickChatUser, restrictChatUser, sendBotMessage, setBotWebhook, unbanChatUser, sendRichMessage, TelegramApiError, type TelegramInlineKeyboard } from '../lib/telegramBot';
 import { blocksToRichHtml, parseInline, type PostBlock } from '../lib/richPost';
-import { processIntervention, reserveModeratorAiCheck, syncModeratorEntitlement } from '../moderator/interventionEngine';
+import { processIntervention, reconcileModeratorAiUsage, reserveModeratorAiCheck, syncModeratorEntitlement } from '../moderator/interventionEngine';
 import { profanityNotice } from '../moderator/profanityPolicy';
 import { presentModerationEvent } from '../moderator/eventPresentation';
 import { sanctionTargets } from '../moderator/sanctionTargets';
 import { moderateProfanity, safeSuggestedRewrite, type AiDecision } from '../moderator/modelRouter';
-import { primaryTextModel } from '../lib/assistantModel';
+import { moderatorTextModel } from '../moderator/aiModel';
 import { runWebhookBackgroundTask } from '../lib/webhookBackground';
 import { activeWarningCount, issueWarning } from '../moderator/warningEngine';
 import { decryptManagedBotToken, encryptManagedBotToken, moderatorTokenForCommunity } from '../moderator/managedBotCrypto';
@@ -353,9 +353,7 @@ const actionNeedsRewrite = (action: AiModerationAction) => action === 'delete_re
 const actionNeedsWarning = (action: AiModerationAction) => action === 'delete_warn' || action === 'delete_rewrite_warn';
 
 async function reconcileAiUsage(userId: string, inputTokens: number, reservedOutputTokens: number, decision: AiDecision | null): Promise<void> {
-  const actualOutputTokens = Math.ceil((decision ? JSON.stringify(decision).length : 0) / 4);
-  const reservedCost = Math.round(inputTokens * 2.5 + reservedOutputTokens * 15), actualCost = Math.round(inputTokens * 2.5 + actualOutputTokens * 15);
-  await prisma.aiModeratorEntitlement.update({ where: { userId }, data: { outputTokensUsed: { increment: actualOutputTokens - reservedOutputTokens }, estimatedCostMicros: { increment: actualCost - reservedCost } } }).catch(() => undefined);
+  await reconcileModeratorAiUsage(userId, inputTokens, reservedOutputTokens, decision?.usage).catch(() => undefined);
 }
 
 /** Applies an already-audited AI verdict and records partial Telegram failures. */
@@ -368,7 +366,7 @@ async function enforceAiViolation(input: {
   let deletePending = false, deleteError: string | null = null, warningCount = 0, sanctionAction = 'NONE', notificationError: string | null = null;
   const rewrite = actionNeedsRewrite(input.action) ? safeSuggestedRewrite(input.originalText, decision.suggestedRewrite) : null;
   const source = { messageId: input.telegramMessageId, tgUserId: input.tgUserId, username: input.username ?? null, displayName: input.displayName ?? null, text: input.originalText };
-  await prisma.moderationEvent.update({ where: { id: input.auditId }, data: { eventType: 'AI_MODERATION_TRIGGERED', decision: decision.category, confidence: decision.confidence, reason: decision.reason, action: input.action.toUpperCase(), status: 'RECEIVED', model: primaryTextModel(), promptVersion: input.promptVersion, metadata: { scope: 'PROFANITY', source, edited: input.edited, suggestedRewrite: rewrite } } });
+  await prisma.moderationEvent.update({ where: { id: input.auditId }, data: { eventType: 'AI_MODERATION_TRIGGERED', decision: decision.category, confidence: decision.confidence, reason: decision.reason, action: input.action.toUpperCase(), status: 'RECEIVED', model: moderatorTextModel(), promptVersion: input.promptVersion, metadata: { scope: 'PROFANITY', source, edited: input.edited, suggestedRewrite: rewrite } } });
   if (input.action !== 'review') {
     try { await deleteBotMessage(input.chatId, input.telegramMessageId, currentToken()); }
     catch (error) { deletePending = true; deleteError = (error as Error).message.slice(0, 500); await scheduleMessageDeletion(input.communityId, input.chatId, input.telegramMessageId, error); }
@@ -431,7 +429,7 @@ async function handleAiModeration(update: ModeratorUpdate, message: TgMessage, r
     let audit: { id: string };
     try { audit = await prisma.moderationEvent.create({ data: { communityId: ctx.community.id, telegramUpdateId: updateId, telegramMessageId: message.message_id,
       tgUserId: String(message.from!.id), blockId: block.id, eventType: 'AI_MODERATION_CHECKED', decision: 'PENDING', action: 'CHECK', status: 'RECEIVED',
-      model: primaryTextModel(), promptVersion: 'profanity-v2', metadata: { scope: 'PROFANITY', edited, author: { tgUserId: String(message.from!.id), username: message.from!.username ?? null, displayName: message.from!.first_name } } }, select: { id: true } }); }
+      model: moderatorTextModel(), promptVersion: 'profanity-v2', metadata: { scope: 'PROFANITY', edited, author: { tgUserId: String(message.from!.id), username: message.from!.username ?? null, displayName: message.from!.first_name } } }, select: { id: true } }); }
     catch (error) { if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return true; throw error; }
     const ownerFeedback = await ownerFeedbackContext(ctx.community.id, 'PROFANITY').catch(() => '');
     const inputTokens = Math.ceil((text.length + settings.customRule.length + ownerFeedback.length) / 4), reservedOutput = actionNeedsRewrite(settings.action) ? 1000 : 100;

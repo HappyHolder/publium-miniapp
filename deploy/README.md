@@ -92,3 +92,7 @@ Only TON orders can create new purchases. Historical Stars tables remain for acc
 `PublicationRecord.status = UNCERTAIN` (or a stale `SENDING`) requires checking the actual Telegram channel before an operator resets a post for retry. Never bulk-reset these records: the message may already be delivered.
 
 Backups and rollback images contain production data/configuration references: store them on the server with restricted permissions. A database rollback requires an explicit recovery decision; additive migrations normally allow rolling the application back without deleting new tables.
+
+## Moderator model override
+
+`OPENAI_MODERATOR_MODEL` in `deploy/.env` selects the model for profanity checks, conduct analysis and repeat verification. Blank inherits `OPENAI_CHAT_MODEL`; other AI roles continue to use the shared model. The 2026-10-25 switch uses `gpt-6.1-sol` for Moderator and keeps `gpt-5.6-terra` for other roles. See [migration validation](../docs/moderator-sol-2026-10-25.md). Keep the previous API image and a protected copy of `deploy/.env` before switching; preserve the moderator's pause and published configuration.
