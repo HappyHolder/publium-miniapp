@@ -265,6 +265,8 @@ try{
  const legacyConsent=await prisma.collaberTask.create({data:{communityManagerId:manager.id,kind:'CONSENT',status:'COMPLETED',dedupeKey:'consent:'+manager.id+':810',payload:{userId:'810',sourceMessageId:810}}});
  const legacyProfile={...legacy,facts:legacyFacts};
  assert.equal((await profileIntroLinks(manager.id,chat.tgChatId,[legacyProfile])).get(legacy.id),'https://t.me/c/'+chat.tgChatId.slice(4)+'/810');
+ const previouslyReviewed={...legacyProfile,reviewedAt:new Date(legacy.sourceAt.getTime()-60000)};
+ assert.equal((await profileIntroLinks(manager.id,chat.tgChatId,[previouslyReviewed])).get(legacy.id),'https://t.me/c/'+chat.tgChatId.slice(4)+'/810','an earlier review must not hide a newer group intro after history retention');
  assert.equal((await profileIntroLinks(manager.id,'-100999999',[legacyProfile])).size,0);
  const reviewLog=await prisma.communityManagerAction.findFirst({where:{communityManagerId:manager.id,intent:'collaber_matching'},orderBy:{createdAt:'desc'}});
  assert.ok(reviewLog.metadata.decisions.some(d=>d.id===verification[0].id&&d.role==='provider'&&d.fit==='direct'&&d.returned));

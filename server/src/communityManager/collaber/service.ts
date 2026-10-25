@@ -71,7 +71,9 @@ export async function ingestIntro(managerId:string,message:IntroMessage,config:C
     const latest=await tx.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}}});
     if(latest?.forgotten||latest&&existing&&latest.updatedAt.getTime()!==existing.updatedAt.getTime())return false;
     const participant=await tx.communityManagerParticipant.upsert({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}},create:{communityManagerId:managerId,tgUserId:message.userId,displayName:message.name,username:message.username,lastSeenAt:new Date(message.at)},update:{...(live?{displayName:message.name,username:message.username,lastSeenAt:new Date(message.at)}:{})}});
-    const data={facts:facts as unknown as Prisma.InputJsonValue,sourceText:message.text,sourceAt:new Date(message.at),sourceMessageId:Number(message.id)||null,...(manual?{reviewedAt:new Date()}:{}),...(live?{membership:'MEMBER'}:{})};
+    const sourceAt=new Date(message.at);
+    const review=manual?{reviewedAt:new Date(Math.max(Date.now(),sourceAt.getTime()))}:message.sourceChatId?{reviewedAt:null}:{};
+    const data={facts:facts as unknown as Prisma.InputJsonValue,sourceText:message.text,sourceAt,sourceMessageId:Number(message.id)||null,...review,...(live?{membership:'MEMBER'}:{})};
     await tx.collaberProfile.upsert({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}},create:{communityManagerId:managerId,participantId:participant.id,tgUserId:message.userId,...data},update:data});
     return true;
   });

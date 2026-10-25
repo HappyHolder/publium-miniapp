@@ -20,7 +20,7 @@ export function parseArchive(raw:unknown, expectedChatId:string) {
     const id=String(row.id??''),text=flatten(row.text).trim();
     const date=row.date_unixtime?new Date(Number(row.date_unixtime)*1000):new Date(row.at??row.date);
     if(row.type==='service'||row.forwarded_from||row.forward_from||row.is_bot||!/^\d+$/.test(userId)||!/^\d+$/.test(id)||!text||!Number.isFinite(date.getTime())||date.getTime()>Date.now()+86400000||seen.has(id)){skipped++;continue}
-    seen.add(id);messages.push({id,userId,name:String(row.from??row.name??'Участник '+userId).slice(0,160),username:safeUsername(row.username),text:text.slice(0,12000),at:date.toISOString()});
+    seen.add(id);messages.push({id,userId,name:String(row.from??row.name??'Участник '+userId).slice(0,160),username:safeUsername(row.username),text:text.slice(0,12000),at:date.toISOString(),sourceChatId:expectedChatId});
   }
   messages.sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
   return {messages,skipped,total:root.messages.length};
