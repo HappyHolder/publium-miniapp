@@ -25,7 +25,29 @@ export function verifiedProfanityTerms(text: string, terms: unknown, allowedWord
   }))].slice(0, 12);
 }
 
-export function profanityNotice(label: string, notice: string, rewrite: string | null, warning = ''): string {
-  const heading = `${label}, ${notice.trim() || 'Пиши без мата.'}`;
-  return [heading, rewrite ? `«${rewrite}»` : '', warning].filter(Boolean).join('\n\n');
+/** Deterministic fallback: preserve the source, replacing only verified profanity.
+ * Keep source offsets even when NFKC expands a character or combines accents.
+ */
+export function redactProfanity(text: string, terms: string[], allowedWords: string[]): string {
+  let normalized = '';
+  const offsets: Array<[number, number]> = [];
+  for (const match of text.matchAll(/\P{M}\p{M}*|\p{M}+/gu)) {
+    const part = normalize(match[0]);
+    normalized += part;
+    for (let i = 0; i < part.length; i++) offsets.push([match.index!, match.index! + match[0].length]);
+  }
+  const allowed = normalizeAllowedWords(allowedWords).flatMap(term => occurrences(normalized, term));
+  const ranges = verifiedProfanityTerms(text, terms, allowedWords).flatMap(term => occurrences(normalized, normalize(term)))
+    .filter(([start, end]) => !allowed.some(([from, to]) => start < to && end > from))
+    .map(([start, end]) => [offsets[start]![0], offsets[end - 1]![1]] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const range of ranges) {
+    const last = merged.at(-1);
+    if (last && range[0] < last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  let cleaned = text;
+  for (const [start, end] of merged.reverse()) cleaned = cleaned.slice(0, start) + '[мат удалён]' + cleaned.slice(end);
+  return cleaned;
 }

@@ -145,8 +145,12 @@ export function conductFallback(conduct: Conduct): string {
 }
 
 export const escapeModeratorHtml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-export function conversationMention(person: Pick<ConversationMessage, 'tgUserId' | 'username' | 'displayName'>): string {
+export function moderatorAuthorLabel(person: Pick<ConversationMessage, 'username' | 'displayName'>): string {
   const username = person.username?.replace(/^@/, '');
-  if (username && /^[a-zA-Z0-9_]{5,32}$/.test(username)) return '@' + username;
-  return `<a href="tg://user?id=${person.tgUserId}">${escapeModeratorHtml(person.displayName?.trim() || 'Участник')}</a>`;
+  const name = person.displayName?.trim().replace(/\s+/g, ' ');
+  if (username && /^[a-zA-Z0-9_]{5,32}$/.test(username)) return '@' + username + (name ? ` (${name})` : '');
+  return name || 'Участник';
+}
+export function conversationMention(person: Pick<ConversationMessage, 'tgUserId' | 'username' | 'displayName'>): string {
+  return `<a href="tg://user?id=${escapeModeratorHtml(person.tgUserId)}"><b>${escapeModeratorHtml(moderatorAuthorLabel(person))}</b></a>`;
 }

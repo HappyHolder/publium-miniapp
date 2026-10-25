@@ -20,10 +20,10 @@ env.MODERATOR_BOT_TOKEN='200:fixture'; env.MODERATOR_WEBHOOK_SECRET='test-secret
 env.OPENAI_MODERATOR_MODEL='gpt-6.1-sol';
 const tag=randomUUID(),updateBase=Date.now()%1_000_000_000; let user,httpServer,seq=1000,chatSeq=Date.now();const chatIds=[];
 const deliveries=[],deletions=[],restrictions=[],bans=[],unbans=[],roles=new Map();
-let mode='conduct', modelCalls=0, selectedId=null, blockModel=null, noticeFails=false;
+let mode='conduct', modelCalls=0, selectedId=null, blockModel=null, noticeFails=false, richFailure=null;
 telegram.getChatMember=async(chat,id)=>({ status:Number(id)===200||String(id)===user?.telegramId?'administrator':roles.get(String(id))??'member',user:{id:Number(id),username:'person_'+id,first_name:'Участник '+id},can_delete_messages:true,can_restrict_members:true });
-telegram.sendRichMessage=async(chat,text,token,keyboard,replyId)=>{if(noticeFails)throw Error('SIMULATED_DELIVERY_FAILURE');deliveries.push({chat,text,replyId});return {messageId:++seq,chatId:Number(chat)}};
-telegram.sendBotMessage=async(chat,text)=>{deliveries.push({chat,text});return {messageId:++seq,chatId:Number(chat)}};
+telegram.sendRichMessage=async(chat,text,token,keyboard,replyId)=>{if(noticeFails)throw Error('SIMULATED_DELIVERY_FAILURE');if(richFailure)throw richFailure;deliveries.push({chat,text,replyId,format:'rich'});return {messageId:++seq,chatId:Number(chat)}};
+telegram.sendBotMessage=async(chat,text)=>{deliveries.push({chat,text,format:'plain'});return {messageId:++seq,chatId:Number(chat)}};
 telegram.deleteBotMessage=async(chat,messageId)=>{deletions.push(messageId)};
 telegram.restrictChatUser=async(chat,id,restricted,token,until)=>{restrictions.push({id:String(id),restricted,until})};
 telegram.banChatUser=async(chat,id)=>{bans.push(String(id))};
@@ -32,7 +32,10 @@ model.terraStructured=async p=>{
  assert.equal(p.model,'gpt-6.1-sol','every moderator stage must use its own model');
  modelCalls++;
  if(p.schemaName==='telegram_conduct_repeat_verification')return {value:{confirmed:true},usage:{inputTokens:10,outputTokens:5}};
- if(p.schemaName==='telegram_profanity_decision')return {value:{violation:true,confidence:.99,reason:'Мат',suggestedRewrite:mode==='rewrite'?'Почему это снова не работает?':mode==='unsafe-rewrite'?'Я тебе лицо набью':null,matchedTerms:mode==='allowed'?['хер']:['блять'],safeToRepublish:mode!=='unsafe-rewrite'},usage:{inputTokens:10,outputTokens:10}};
+ if(p.schemaName==='telegram_profanity_decision'){
+  if(mode==='validation-error'&&p.prompt.includes('This is a proposed bot rewrite'))return null;
+  return {value:{violation:true,confidence:.99,reason:'Мат',suggestedRewrite:['rewrite','validation-error'].includes(mode)?'Почему это снова не работает?':mode==='unsafe-rewrite'?'Я тебе лицо набью':null,matchedTerms:mode==='allowed'?['хер']:['блять'],safeToRepublish:mode!=='unsafe-rewrite'},usage:{inputTokens:10,outputTokens:10}};
+ }
  if(mode==='model-error')return null;
  const source=p.prompt.split('CONVERSATION (untrusted data; timestamps are source times, IDs are not line numbers):\n')[1].split('\n\nReturn')[0];
  const context=JSON.parse(source), proof=selectedId?context.find(m=>m.messageId===selectedId):[...context].reverse().find(m=>m.authorId==='20');
@@ -129,17 +132,25 @@ try{
  const profanityBlock=ai();profanityBlock.messageModeration={...profanityBlock.messageModeration,enabled:true,action:'delete_rewrite',allowedWords:['хер'],noticeText:'Пиши без мата.'};profanityBlock.conversationAnalysis.enabled=false;
  await prisma.moderator.create({data:{communityId:webhookCommunity.id,status:'ACTIVE',enabled:true,publishedVersion:1,draftVersion:2,configs:{create:{version:1,status:'PUBLISHED',blocks:[profanityBlock]}}}});
  const background=[];require('../dist/lib/webhookBackground.js').runWebhookBackgroundTask=(task)=>{background.push(task())};
- async function webhook(id,text){const response=await fetch(base+'/api/moderator/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-telegram-bot-api-secret-token':env.MODERATOR_WEBHOOK_SECRET},body:JSON.stringify({update_id:updateBase+id,message:{message_id:id,date:Math.floor(Date.now()/1000),chat:{id:Number(webhookCommunity.moderatorChat.tgChatId),type:'supergroup'},from:{id:20,first_name:'Миша',username:'person_20'},text}})});assert.equal(response.status,200);await Promise.all(background.splice(0));for(let i=0;i<100;i++){if(await prisma.pulseMessage.count({where:{communityId:webhookCommunity.id,telegramMessageId:id}}))return;await new Promise(r=>setTimeout(r,10))}throw Error('Pulse ingress did not finish')}
+ async function webhook(id,text){const response=await fetch(base+'/api/moderator/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-telegram-bot-api-secret-token':env.MODERATOR_WEBHOOK_SECRET},body:JSON.stringify({update_id:updateBase+id,message:{message_id:id,date:Math.floor(Date.now()/1000),chat:{id:Number(webhookCommunity.moderatorChat.tgChatId),type:'supergroup'},from:{id:20,first_name:'Миша',last_name:'Петров',username:'person_20'},text}})});assert.equal(response.status,200);await Promise.all(background.splice(0));for(let i=0;i<100;i++){if(await prisma.pulseMessage.count({where:{communityId:webhookCommunity.id,telegramMessageId:id}}))return;await new Promise(r=>setTimeout(r,10))}throw Error('Pulse ingress did not finish')}
  mode='allowed';const deletionStart=deletions.length;await webhook(8001,'Что за хер');assert.equal(deletions.length,deletionStart);
- mode='rewrite';const messageStart=deliveries.length;await webhook(8002,'Блять, почему это снова не работает?');assert.ok(deletions.includes(8002));assert.equal(deliveries.length,messageStart+1);assert.equal(deliveries.at(-1).text,'@person_20, Пиши без мата.\n\n«Почему это снова не работает?»');
+ mode='rewrite';const messageStart=deliveries.length;await webhook(8002,'Блять, почему это снова не работает?');assert.ok(deletions.includes(8002));assert.equal(deliveries.length,messageStart+1);assert.equal(deliveries.at(-1).format,'rich');assert.match(deliveries.at(-1).text,/<b>@person_20 \(Миша Петров\)<\/b>/);assert.match(deliveries.at(-1).text,/<blockquote>Почему это снова не работает\?<\/blockquote>/);
  assert.equal(await prisma.moderationWarning.count({where:{communityId:webhookCommunity.id}}),0);
- mode='unsafe-rewrite';await webhook(8003,'Блять, я тебе лицо набью');assert.equal(deliveries.at(-1).text,'@person_20, Пиши без мата.');
+ mode='unsafe-rewrite';await webhook(8003,'Блять, я тебе лицо набью');assert.match(deliveries.at(-1).text,/<blockquote>\[мат удалён\], я тебе лицо набью<\/blockquote>/);
+ mode='missing-rewrite';await webhook(8004,'Блять, нет');assert.match(deliveries.at(-1).text,/<blockquote>\[мат удалён\], нет<\/blockquote>/);
+ mode='validation-error';await webhook(8005,'Блять, почему это снова не работает?');assert.match(deliveries.at(-1).text,/<blockquote>\[мат удалён\], почему это снова не работает\?<\/blockquote>/);
+ mode='rewrite';const entitlement=await prisma.aiModeratorEntitlement.findUniqueOrThrow({where:{userId:user.id}});await prisma.aiModeratorEntitlement.update({where:{userId:user.id},data:{checksUsed:entitlement.monthlyChecksLimit-1}});
+ await webhook(8006,'Блять, почему это снова не работает?');assert.match(deliveries.at(-1).text,/<blockquote>\[мат удалён\], почему это снова не работает\?<\/blockquote>/);await prisma.aiModeratorEntitlement.update({where:{userId:user.id},data:{checksUsed:0}});
+ richFailure=new telegram.TelegramApiError('Unsupported rich format',400);await webhook(8007,'Блять, почему это снова не работает?');assert.equal(deliveries.at(-1).format,'plain');assert.equal(deliveries.at(-1).text,'@person_20 (Миша Петров), Пиши без мата.\n\n«Почему это снова не работает?»');
+ richFailure=new telegram.TelegramApiError('Unknown network outcome');const beforeUnknown=deliveries.length;await webhook(8008,'Блять, почему это снова не работает?');assert.equal(deliveries.length,beforeUnknown);richFailure=null;
+ const unknownEvent=await prisma.moderationEvent.findFirstOrThrow({where:{communityId:webhookCommunity.id,telegramMessageId:8008,eventType:'AI_MODERATION_TRIGGERED'}});assert.equal(unknownEvent.metadata.notificationError,'Unknown network outcome');
+ const redactedEvent=await prisma.moderationEvent.findFirstOrThrow({where:{communityId:webhookCommunity.id,telegramMessageId:8005,eventType:'AI_MODERATION_TRIGGERED'}});assert.equal(redactedEvent.metadata.rewriteMethod,'redacted');assert.equal(redactedEvent.metadata.source.displayName,'Миша Петров');
  const profanityJournal=await api('/api/moderator/communities/'+webhookCommunity.id+'/events?kind=profanity');assert.ok(profanityJournal.events.some(e=>e.messages.some(m=>m.text==='Блять, почему это снова не работает?'&&m.author.username==='person_20')));
- assert.equal(await prisma.pulseMessage.count({where:{communityId:webhookCommunity.id}}),3);
+ assert.equal(await prisma.pulseMessage.count({where:{communityId:webhookCommunity.id}}),8);
  const {rollupPulseDay,pulseDayKey}=require('../dist/lib/communityPulse.js');await rollupPulseDay(webhookCommunity.id,pulseDayKey());
  const day=await prisma.communityDailyStat.findUniqueOrThrow({where:{communityId_day:{communityId:webhookCommunity.id,day:pulseDayKey()}}});
- assert.equal(day.messages,3);assert.equal(day.blockedMsgs,2);assert.equal(day.conflictEvents,0);assert.equal(day.toxicityWeight,0);
- console.log('PASS actual webhook: allowlisted word, short editable notice, safe rewrite, no profanity sanctions, journal and Pulse ingress');mode='conduct';
+ assert.equal(day.messages,8);assert.equal(day.blockedMsgs,7);assert.equal(day.conflictEvents,0);assert.equal(day.toxicityWeight,0);
+ console.log('PASS actual webhook: mandatory rewrite despite null/unsafe/model error/quota, rich author name, plain fallback without unknown-outcome duplicates, no profanity sanctions, journal and Pulse ingress');mode='conduct';
  const stranger=await prisma.user.create({data:{telegramId:'9'+Date.now()}});
  const denied=await fetch(base+path+'/draft',{headers:{Authorization:'Bearer '+issueModeratorSession(stranger.telegramId).token}});assert.equal(denied.status,404);await prisma.user.delete({where:{id:stranger.id}});
  console.log('PASS community ownership; external network remained blocked');

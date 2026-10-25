@@ -9,7 +9,8 @@ import { verifyModeratorSession } from '../lib/moderatorSession';
 import { answerBotCallback, banChatUser, buildInlineKeyboard, deleteBotMessage, deleteBotWebhook, getBotIdFromToken, getBotIdentity, getChatAdministrators, getChatMember, getChatMemberCount, getManagedBotToken, kickChatUser, restrictChatUser, sendBotMessage, setBotWebhook, unbanChatUser, sendRichMessage, TelegramApiError, type TelegramInlineKeyboard } from '../lib/telegramBot';
 import { blocksToRichHtml, parseInline, type PostBlock } from '../lib/richPost';
 import { processIntervention, reconcileModeratorAiUsage, reserveModeratorAiCheck, syncModeratorEntitlement } from '../moderator/interventionEngine';
-import { profanityNotice } from '../moderator/profanityPolicy';
+import { redactProfanity } from '../moderator/profanityPolicy';
+import { profanityNotices, sendProfanityNotices } from '../moderator/profanityNotice';
 import { presentModerationEvent } from '../moderator/eventPresentation';
 import { sanctionTargets } from '../moderator/sanctionTargets';
 import { moderateProfanity, safeSuggestedRewrite, type AiDecision } from '../moderator/modelRouter';
@@ -337,18 +338,6 @@ async function scheduleMessageDeletion(communityId: string, chatId: number, mess
   });
 }
 
-function telegramTextChunks(text: string, maxLength = 3900): string[] {
-  const chunks: string[] = []; let rest = text.trim();
-  while (rest.length > maxLength) {
-    const window = rest.slice(0, maxLength + 1);
-    const splitAt = Math.max(window.lastIndexOf('\n'), window.lastIndexOf(' '));
-    const end = splitAt > maxLength * 0.6 ? splitAt : maxLength;
-    chunks.push(rest.slice(0, end).trim()); rest = rest.slice(end).trim();
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
-}
-
 const actionNeedsRewrite = (action: AiModerationAction) => action === 'delete_rewrite' || action === 'delete_rewrite_warn';
 const actionNeedsWarning = (action: AiModerationAction) => action === 'delete_warn' || action === 'delete_rewrite_warn';
 
@@ -364,7 +353,7 @@ async function enforceAiViolation(input: {
 }): Promise<void> {
   const { decision } = input;
   let deletePending = false, deleteError: string | null = null, warningCount = 0, sanctionAction = 'NONE', notificationError: string | null = null;
-  const rewrite = actionNeedsRewrite(input.action) ? safeSuggestedRewrite(input.originalText, decision.suggestedRewrite) : null;
+  const rewrite = actionNeedsRewrite(input.action) ? decision.suggestedRewrite : null;
   const source = { messageId: input.telegramMessageId, tgUserId: input.tgUserId, username: input.username ?? null, displayName: input.displayName ?? null, text: input.originalText };
   await prisma.moderationEvent.update({ where: { id: input.auditId }, data: { eventType: 'AI_MODERATION_TRIGGERED', decision: decision.category, confidence: decision.confidence, reason: decision.reason, action: input.action.toUpperCase(), status: 'RECEIVED', model: moderatorTextModel(), promptVersion: input.promptVersion, metadata: { scope: 'PROFANITY', source, edited: input.edited, suggestedRewrite: rewrite } } });
   if (input.action !== 'review') {
@@ -380,18 +369,15 @@ async function enforceAiViolation(input: {
       warningCount = 1; sanctionAction = 'WARN';
     }
   }
+  const notices = profanityNotices({ tgUserId: input.tgUserId, username: input.username, displayName: input.displayName,
+    notice: input.noticeText, rewrite, warning: warningNotice(sanctionAction as 'NONE' | 'WARN' | 'MUTE' | 'BAN', warningCount, input.warningPolicy) });
   if (input.action !== 'review') {
-    const label = input.username ? '@' + input.username : input.displayName?.trim() || 'Участник';
-    const warning = warningNotice(sanctionAction as 'NONE' | 'WARN' | 'MUTE' | 'BAN', warningCount, input.warningPolicy);
-    const guidance = profanityNotice(label, input.noticeText, rewrite, warning);
     try {
-      for (const chunk of telegramTextChunks(guidance)) {
-        await sendBotMessage(input.chatId, chunk, currentToken());
-      }
+      await sendProfanityNotices(input.chatId, notices, currentToken());
     } catch (error) { notificationError = (error as Error).message.slice(0, 500); }
   }
   const action = input.action === 'review' ? 'REVIEW' : `${input.action.toUpperCase()}_${sanctionAction}${deletePending ? '_DELETE_PENDING' : ''}`;
-  await prisma.moderationEvent.update({ where: { id: input.auditId }, data: { status: 'PROCESSED', action, metadata: { scope: 'PROFANITY', source, edited: input.edited, category: input.decision.category, severity: input.decision.severity, directed: input.decision.directed, suggestedRewrite: rewrite, rewriteRequested: actionNeedsRewrite(input.action), warningCount, sanctionAction, deletePending, deleteError, notificationError, response: input.action === 'review' ? '' : profanityNotice(input.username ? '@' + input.username : input.displayName || 'Участник', input.noticeText, rewrite, warningNotice(sanctionAction as 'NONE' | 'WARN' | 'MUTE' | 'BAN', warningCount, input.warningPolicy)) } } });
+  await prisma.moderationEvent.update({ where: { id: input.auditId }, data: { status: 'PROCESSED', action, metadata: { scope: 'PROFANITY', source, edited: input.edited, category: input.decision.category, severity: input.decision.severity, directed: input.decision.directed, suggestedRewrite: rewrite, rewriteMethod: input.decision.rewriteMethod ?? null, rewriteRequested: actionNeedsRewrite(input.action), warningCount, sanctionAction, deletePending, deleteError, notificationError, response: input.action === 'review' ? '' : notices.map(n => n.text).join('\n\n') } } });
 }
 
 async function handleAiModeration(update: ModeratorUpdate, message: TgMessage, res: Response, edited = false): Promise<boolean> {
@@ -416,7 +402,7 @@ async function handleAiModeration(update: ModeratorUpdate, message: TgMessage, r
   // remove human context or suppress analysis of actual personal attacks.
   const conversation = block.conversationAnalysis.enabled && !edited ? processIntervention({
     updateId: eventKey(update.update_id), communityId: ctx.community.id, ownerUserId, chatId: message.chat.id, tgUserId: String(message.from.id),
-    username: message.from.username, displayName: message.from.first_name, telegramMessageId: message.message_id,
+    username: message.from.username, displayName: [message.from.first_name, message.from.last_name].filter(Boolean).join(' '), telegramMessageId: message.message_id,
     replyToMessageId: message.reply_to_message?.message_id, replyToUserId: message.reply_to_message?.from ? String(message.reply_to_message.from.id) : undefined,
     replyToBot: message.reply_to_message?.from?.is_bot, sanctionExempt: admin || Boolean(member?.trusted),
     sentAt: message.date ? new Date(message.date * 1000) : new Date(), threadKey: message.message_thread_id ? `topic:${message.message_thread_id}` : 'main',
@@ -429,7 +415,7 @@ async function handleAiModeration(update: ModeratorUpdate, message: TgMessage, r
     let audit: { id: string };
     try { audit = await prisma.moderationEvent.create({ data: { communityId: ctx.community.id, telegramUpdateId: updateId, telegramMessageId: message.message_id,
       tgUserId: String(message.from!.id), blockId: block.id, eventType: 'AI_MODERATION_CHECKED', decision: 'PENDING', action: 'CHECK', status: 'RECEIVED',
-      model: moderatorTextModel(), promptVersion: 'profanity-v2', metadata: { scope: 'PROFANITY', edited, author: { tgUserId: String(message.from!.id), username: message.from!.username ?? null, displayName: message.from!.first_name } } }, select: { id: true } }); }
+      model: moderatorTextModel(), promptVersion: 'profanity-v3', metadata: { scope: 'PROFANITY', edited, author: { tgUserId: String(message.from!.id), username: message.from!.username ?? null, displayName: [message.from!.first_name, message.from!.last_name].filter(Boolean).join(' ') } } }, select: { id: true } }); }
     catch (error) { if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return true; throw error; }
     const ownerFeedback = await ownerFeedbackContext(ctx.community.id, 'PROFANITY').catch(() => '');
     const inputTokens = Math.ceil((text.length + settings.customRule.length + ownerFeedback.length) / 4), reservedOutput = actionNeedsRewrite(settings.action) ? 1000 : 100;
@@ -449,19 +435,25 @@ async function handleAiModeration(update: ModeratorUpdate, message: TgMessage, r
     }
     if (actionNeedsRewrite(settings.action)) {
       const candidate = safeSuggestedRewrite(text, decision.suggestedRewrite);
-      decision.suggestedRewrite = null;
+      // Once a violation is established, the rewrite action always carries text,
+      // including when generation/validation is unavailable or quota runs out.
+      decision.suggestedRewrite = redactProfanity(text, decision.matchedTerms ?? [], settings.allowedWords);
+      decision.rewriteMethod = 'redacted';
       if (candidate) {
         const validationTokens = Math.ceil(candidate.length / 4);
         if (await reserveModeratorAiCheck(ownerUserId, validationTokens, 100)) {
           const validation = await moderateProfanity({ text: candidate, customRule: settings.customRule, ownerFeedback, allowedWords: settings.allowedWords, checkRewriteSafety: true });
           await reconcileAiUsage(ownerUserId, validationTokens, 100, validation);
-          if (validation && !validation.violation && validation.safeToRepublish) decision.suggestedRewrite = candidate;
+          if (validation && !validation.violation && validation.safeToRepublish) {
+            decision.suggestedRewrite = candidate;
+            decision.rewriteMethod = 'ai';
+          }
         }
       }
     }
     await enforceAiViolation({ updateId, communityId: ctx.community.id, chatId: message.chat.id, tgUserId: String(message.from!.id), telegramMessageId: message.message_id,
-      blockId: block.id, action: settings.action, warningPolicy: ctx.warningPolicy, decision, promptVersion: 'profanity-v2', auditId: audit.id,
-      originalText: text, username: message.from!.username, displayName: message.from!.first_name, edited, noticeText: settings.noticeText });
+      blockId: block.id, action: settings.action, warningPolicy: ctx.warningPolicy, decision, promptVersion: 'profanity-v3', auditId: audit.id,
+      originalText: text, username: message.from!.username, displayName: [message.from!.first_name, message.from!.last_name].filter(Boolean).join(' '), edited, noticeText: settings.noticeText });
     return true;
   };
   const [messageResult, conversationResult] = await Promise.allSettled([profanity(), conversation]);

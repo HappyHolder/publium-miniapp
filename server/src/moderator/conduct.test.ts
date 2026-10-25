@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_BLOCKS, mergeAiModeratorSection, normalizeAllowedWords, parseBlocks, type AiModerationBlock } from './config';
 import { buildConversationPrompt, canRespondToConversation, freshConversationEvidence, validateConversationDecision, conversationMention, type ConversationMessage } from './conversationPolicy';
-import { verifiedProfanityTerms, profanityNotice } from './profanityPolicy';
+import { verifiedProfanityTerms } from './profanityPolicy';
 import { presentModerationEvent } from './eventPresentation';
 import { sanctionTargets } from './sanctionTargets';
 import { warningScope } from './warningEngine';
@@ -41,9 +41,6 @@ test('allowlist is whole-word and does not disable actual mat elsewhere in a mix
   assert.deepEqual(verifiedProfanityTerms('хер, блять, херня', ['хер','блять','херня','вымышленное'], ['хер']), ['блять','херня']);
   assert.deepEqual(verifiedProfanityTerms('Вот ёлки!', ['ёлки'], ['елки']), []);
   assert.deepEqual(verifiedProfanityTerms('бл*ть!', ['бл*ть'], []), ['бл*ть']);
-});
-test('notice wording is independent from the rewrite and never inserts an unsolicited lecture', () => {
-  assert.equal(profanityNotice('@user','Пиши без мата.', 'Вот это да'), '@user, Пиши без мата.\n\n«Вот это да»');
 });
 test('new author is never substituted for the actor in older evidence', () => {
   const d = checked(); assert.deepEqual(d.actorIds,['20']); assert.deepEqual(d.targetIds,['10']); assert.notEqual(d.actorIds[0],messages.at(-1)!.tgUserId);
@@ -84,8 +81,8 @@ test('conduct prompt preserves independent policies and source IDs and timestamp
   assert.ok(prompt.includes('130192')); assert.ok(prompt.includes(messages[1]!.sentAt.toISOString())); assert.ok(prompt.includes('illustrative insult')); assert.ok(prompt.includes('ANOTHER independent filter'));
 });
 test('mentions use known Telegram identities and escape clickable display names', () => {
-  assert.equal(conversationMention(messages[1]!), '@person_b');
-  assert.equal(conversationMention({ tgUserId:'20',displayName:'<b>Имя</b>' }), '<a href="tg://user?id=20">&lt;b&gt;Имя&lt;/b&gt;</a>');
+  assert.equal(conversationMention(messages[1]!), '<a href="tg://user?id=20"><b>@person_b</b></a>');
+  assert.equal(conversationMention({ tgUserId:'20',displayName:'<b>Имя</b>' }), '<a href="tg://user?id=20"><b>&lt;b&gt;Имя&lt;/b&gt;</b></a>');
 });
 test('warning scopes never combine profanity with conduct or ordinary filters', () => {
   assert.equal(warningScope('AI'),'PROFANITY'); assert.equal(warningScope('AI_CONVERSATION'),'CONVERSATION'); assert.equal(warningScope('ANTISPAM'),'GENERAL');
