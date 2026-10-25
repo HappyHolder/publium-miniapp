@@ -8,9 +8,18 @@ export type ContentFiltersBlock = { id: string; type: 'content_filters'; enabled
 export type ModeratorPersonality = { archetype:'calm'|'strict'|'insider'|'ironic'|'security'; character:string[]; manner:string[]; strictness:0|1|2|3; humor:0|1|2; slang:boolean; customInstructions:string };
 export type AiModerationAction = 'review' | 'delete' | 'delete_warn' | 'delete_rewrite' | 'delete_rewrite_warn';
 export type ConversationCategory = 'conflict' | 'toxicity' | 'harassment' | 'threat' | 'fraud' | 'semantic_spam' | 'off_topic';
-export type MessageModerationConfig = { enabled:boolean; action:AiModerationAction; confidenceThreshold:number; minLength:number; customRule:string; skipBots:boolean; skipAdmins:boolean; skipTrusted:boolean };
-export type ConversationAnalysisConfig = { enabled:boolean; categories:ConversationCategory[]; reaction:'observe'|'respond'|'sanctions'; customRules:string; responseAutoDeleteSeconds:number; personality:ModeratorPersonality };
+export type AiSanctionPolicy = { warningExpiryDays:number; muteAfterWarnings:number; muteDurationSeconds:number; banAfterWarnings:number };
+export type MessageModerationConfig = { enabled:boolean; action:AiModerationAction; confidenceThreshold:number; minLength:number; customRule:string; skipBots:boolean; skipAdmins:boolean; skipTrusted:boolean; allowedWords:string[]; noticeText:string };
+export type ConversationAnalysisConfig = { enabled:boolean; categories:ConversationCategory[]; reaction:'observe'|'respond'|'sanctions'; customRules:string; responseAutoDeleteSeconds:number; personality:ModeratorPersonality; minMessages:number; confidenceThreshold:number; sanctions:AiSanctionPolicy };
 export type AiModerationBlock = { id:string; type:'ai_moderation'; enabled:boolean; messageModeration:MessageModerationConfig; conversationAnalysis:ConversationAnalysisConfig };
+export type AiModeratorSection = 'messageModeration' | 'conversationAnalysis';
+export function isAiModeratorSection(value: unknown): value is AiModeratorSection {
+  return value === 'messageModeration' || value === 'conversationAnalysis';
+}
+export function mergeAiModeratorSection(base: AiModerationBlock, incoming: AiModerationBlock, section: AiModeratorSection): AiModerationBlock {
+  const next = { ...base, [section]: incoming[section] };
+  return { ...next, enabled: next.messageModeration.enabled || next.conversationAnalysis.enabled };
+}
 export type WarningPolicyBlock = { id: string; type: 'warning_policy'; enabled: boolean; warningExpiryDays: number; muteAfterWarnings: number; muteDurationSeconds: number; banAfterWarnings: number; deleteCommandMessages: boolean; notifyUser: boolean; skipAdmins: boolean };
 export type TriggerButton = { id: string; label: string; url: string };
 export type TriggerReply = { id: string; name: string; enabled: boolean; phrases: string[]; matchMode: 'exact' | 'prefix' | 'contains'; text: string; imageUrl?: string; buttons: TriggerButton[]; access: 'all' | 'admins'; cooldownSeconds: number; autoDeleteSeconds: number; deleteTriggerMessage: boolean; useAsAiKnowledge: boolean };
@@ -21,7 +30,7 @@ export const DEFAULT_BLOCKS: ModeratorBlock[] = [
   { id: 'welcome-default', type: 'welcome', enabled: false, text: 'Добро пожаловать, **{name}**! Перед общением познакомьтесь с правилами {group}.', buttons: [], autoDeleteSeconds: 0, deleteJoinMessage: false, firstJoinOnly: false, skipBots: true, skipAdmins: true },
   { id: 'captcha-default', type: 'captcha', enabled: false, text: '**{name}**, подтвердите, что вы человек.', buttonText: 'Я человек', timeoutSeconds: 300, failureAction: 'kick', deleteOnSuccess: true, skipBots: true, skipAdmins: true, skipTrusted: true },
   { id: 'content-filters-default', type: 'content_filters', enabled: false, stopWords: [], textCategories: [], regexPatterns: [], blacklistedDomains: [], maxMentions: 0, capsEnabled: false, capsPercent: 80, capsMinLetters: 10, emojiEnabled: false, maxEmoji: 10, blockForwarded: false, blockedMedia: [], action: 'delete', skipBots: true, skipAdmins: true, skipTrusted: true },
-  { id:'ai-moderation-default', type:'ai_moderation', enabled:false, messageModeration:{enabled:false,action:'review',confidenceThreshold:0.85,minLength:1,customRule:'',skipBots:true,skipAdmins:true,skipTrusted:true}, conversationAnalysis:{enabled:false,categories:['conflict','toxicity','harassment','threat','fraud','semantic_spam'],reaction:'observe',customRules:'',responseAutoDeleteSeconds:600,personality:{archetype:'calm',character:['спокойный','справедливый'],manner:['коротко','по делу'],strictness:2,humor:0,slang:false,customInstructions:''}} },
+  { id:'ai-moderation-default', type:'ai_moderation', enabled:false, messageModeration:{enabled:false,action:'review',confidenceThreshold:0.85,minLength:1,customRule:'',skipBots:true,skipAdmins:true,skipTrusted:true,allowedWords:[],noticeText:'Пиши без мата.'}, conversationAnalysis:{enabled:false,categories:['conflict','toxicity','harassment','threat','fraud','semantic_spam'],reaction:'observe',customRules:'',responseAutoDeleteSeconds:600,minMessages:3,confidenceThreshold:.9,sanctions:{warningExpiryDays:30,muteAfterWarnings:3,muteDurationSeconds:3600,banAfterWarnings:0},personality:{archetype:'calm',character:['спокойный','справедливый'],manner:['коротко','по делу'],strictness:2,humor:0,slang:false,customInstructions:''}} },
   { id: 'warning-policy-default', type: 'warning_policy', enabled: true, warningExpiryDays: 30, muteAfterWarnings: 3, muteDurationSeconds: 3600, banAfterWarnings: 5, deleteCommandMessages: true, notifyUser: true, skipAdmins: true },
   { id: 'antispam-default', type: 'antispam', enabled: false, floodEnabled: true, maxMessages: 6, windowSeconds: 10, duplicateEnabled: true, maxDuplicates: 3, duplicateWindowSeconds: 60, linksMode: 'allow', allowedDomains: [], telegramBotsMode: 'allow', allowedBotUsernames: [], action: 'delete', skipBots: true, skipAdmins: true, skipTrusted: true, raidEnabled: false, raidJoinThreshold: 10, raidWindowSeconds: 60, raidDurationMinutes: 30, blacklistEnabled: false, blacklistThreshold: 2, blacklistAction: 'observe' },
   { id: 'probation-default', type: 'probation', enabled: false, durationHours: 24, messageThreshold: 5, blockLinks: true, blockForwards: true, blockMedia: false, action: 'delete_warn' },
@@ -35,6 +44,9 @@ const MEDIA_TYPES = new Set(['photo','video','document','audio','voice','video_n
 const safeRegexPatterns = (raw: unknown): string[] => (Array.isArray(raw) ? raw : []).slice(0, 20).map((v, i) => { const pattern = typeof v === 'string' ? v.trim() : ''; if (!pattern) return ''; const unbounded = (pattern.match(/[*+]/g)?.length ?? 0) + (pattern.match(/\{\d+,\}/g)?.length ?? 0); const oversizedRange = [...pattern.matchAll(/\{(\d+)(?:,(\d*))?\}/g)].some(m => Number(m[1]) > 100 || (m[2] && Number(m[2]) > 100)); if (pattern.length > 120 || /\\[1-9]/.test(pattern) || /\(\?[=!<]/.test(pattern) || /\([^)]*[*+?{][^)]*\)[*+?{]/.test(pattern) || /\([^)]*\|[^)]*\)[*+?{]/.test(pattern) || unbounded > 1 || oversizedRange) throw new Error(`Небезопасное regex-выражение в строке ${i + 1}`); try { new RegExp(pattern, 'iu'); } catch { throw new Error(`Некорректное regex-выражение в строке ${i + 1}`); } return pattern; }).filter(Boolean);
 const idAndEnabled = (b: Record<string, unknown>, index: number) => { if (typeof b['id'] !== 'string' || !b['id']) throw new Error(`blocks[${index}].id is required`); if (typeof b['enabled'] !== 'boolean') throw new Error(`blocks[${index}].enabled must be boolean`); return { id: b['id'], enabled: b['enabled'] }; };
 const textList=(value:unknown,fallback:string[],max=5)=>Array.isArray(value)?[...new Set(value.flatMap(item=>typeof item==='string'&&item.trim()?[item.trim().slice(0,60)]:[]))].slice(0,max):fallback;
+export const normalizeAllowedWords = (value: unknown): string[] => [...new Set((Array.isArray(value) ? value : []).flatMap(item =>
+  typeof item === 'string' ? item.split(/[\n,;]+/).map(word => word.normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е').trim()) : [],
+).filter(word => /^[\p{L}\p{N}]+(?:[ -][\p{L}\p{N}]+)*$/u.test(word) && word.length <= 60))].slice(0, 100);
 const moderatorPersonality=(value:unknown):ModeratorPersonality=>{
   const p=value&&typeof value==='object'?value as Record<string,unknown>:{},archetype=['calm','strict','insider','ironic','security'].includes(String(p['archetype']))?String(p['archetype']) as ModeratorPersonality['archetype']:'calm';
   return {archetype,character:textList(p['character'],['спокойный','справедливый']),manner:textList(p['manner'],['коротко','по делу']),strictness:integer(p['strictness'],2,0,3) as 0|1|2|3,humor:integer(p['humor'],0,0,2) as 0|1|2,slang:bool(p['slang'],false),customInstructions:typeof p['customInstructions']==='string'?p['customInstructions'].trim().slice(0,600):''};
@@ -70,9 +82,12 @@ export function parseBlocks(value: unknown): ModeratorBlock[] {
       const categoryValues = new Set<ConversationCategory>(['conflict','toxicity','harassment','threat','fraud','semantic_spam','off_topic']);
       const categories = [...new Set((Array.isArray(conversationRaw?.['categories']) ? conversationRaw['categories'] : ['conflict','toxicity','harassment','threat','fraud','semantic_spam']).flatMap(value => typeof value === 'string' && categoryValues.has(value as ConversationCategory) ? [value as ConversationCategory] : []))];
       const legacyRules = typeof b['rules'] === 'string' ? b['rules'].trim().slice(0,3000) : '';
-      const reaction = conversationRaw?.['reaction'] === 'respond' || conversationRaw?.['reaction'] === 'sanctions'
+      let reaction: ConversationAnalysisConfig['reaction'] = conversationRaw?.['reaction'] === 'respond' || conversationRaw?.['reaction'] === 'sanctions'
         ? conversationRaw['reaction']
         : b['interventionMode'] === 'respond' || b['interventionMode'] === 'respond_warn' ? 'respond' : 'observe';
+      const legacyWarningPolicy = value.find(raw => raw && typeof raw === 'object' && raw.type === 'warning_policy');
+      // Older installations used the shared switch. Migration must not silently enable punishment.
+      if (reaction === 'sanctions' && !conversationRaw?.['sanctions'] && legacyWarningPolicy?.enabled === false) reaction = 'respond';
       const messageModeration:MessageModerationConfig = {
         enabled:bool(messageRaw?.['enabled'],bool(b['enabled'],false)),
         action:messageAction,
@@ -82,6 +97,8 @@ export function parseBlocks(value: unknown): ModeratorBlock[] {
         skipBots:bool(messageRaw?.['skipBots'],bool(b['skipBots'],true)),
         skipAdmins:bool(messageRaw?.['skipAdmins'],bool(b['skipAdmins'],true)),
         skipTrusted:bool(messageRaw?.['skipTrusted'],bool(b['skipTrusted'],true)),
+        allowedWords:normalizeAllowedWords(messageRaw?.['allowedWords']),
+        noticeText:typeof messageRaw?.['noticeText']==='string'&&messageRaw['noticeText'].trim()?messageRaw['noticeText'].trim().slice(0,300):'Пиши без мата.',
       };
       const conversationAnalysis:ConversationAnalysisConfig = {
         enabled:bool(conversationRaw?.['enabled'],bool(b['interventionsEnabled'],false)),
@@ -90,6 +107,9 @@ export function parseBlocks(value: unknown): ModeratorBlock[] {
         customRules:(typeof conversationRaw?.['customRules'] === 'string' ? conversationRaw['customRules'].trim() : legacyRules).slice(0,3000),
         responseAutoDeleteSeconds:integer(conversationRaw?.['responseAutoDeleteSeconds'] ?? b['responseAutoDeleteSeconds'],600,0,86400),
         personality:moderatorPersonality(conversationRaw?.['personality'] ?? b['personality']),
+        minMessages:integer(conversationRaw?.['minMessages'],3,2,8),
+        confidenceThreshold:Math.max(.85,Math.min(typeof conversationRaw?.['confidenceThreshold']==='number'?conversationRaw['confidenceThreshold']:.9,.99)),
+        sanctions:parseAiSanctionPolicy(conversationRaw?.['sanctions'], value.find(raw => raw && typeof raw === 'object' && raw.type === 'warning_policy')),
       };
       return { ...base, type:'ai_moderation', enabled:messageModeration.enabled||conversationAnalysis.enabled, messageModeration, conversationAnalysis };
     }
@@ -137,6 +157,18 @@ export function parseBlocks(value: unknown): ModeratorBlock[] {
     const buttons = Array.isArray(b['buttons']) ? b['buttons'].slice(0, 3).flatMap((x, i) => { if (!x || typeof x !== 'object') return []; const q = x as Record<string, unknown>, label = typeof q['label'] === 'string' ? q['label'].trim().slice(0, 64) : '', url = typeof q['url'] === 'string' ? q['url'].trim().slice(0, 2000) : ''; return label && /^(https?:\/\/|@)/i.test(url) ? [{ id: typeof q['id'] === 'string' ? q['id'] : `welcome-btn-${i}`, label, url }] : []; }) : [];
     return { ...base, type: 'welcome', text: text.slice(0, 3500), ...(typeof b['returnText'] === 'string' && b['returnText'].trim() ? { returnText: b['returnText'].trim().slice(0, 3500) } : {}), ...(typeof b['imageUrl'] === 'string' && /^https?:\/\//i.test(b['imageUrl']) ? { imageUrl: b['imageUrl'].slice(0, 2000) } : {}), buttons, autoDeleteSeconds: integer(b['autoDeleteSeconds'], 0, 0, 172800), deleteJoinMessage: bool(b['deleteJoinMessage'], false), firstJoinOnly: bool(b['firstJoinOnly'], false), skipBots: bool(b['skipBots'], true), skipAdmins: bool(b['skipAdmins'], true) };
   });
+}
+
+/** Old installations keep their published thresholds; new conflict policies never ban by default. */
+function parseAiSanctionPolicy(value: unknown, legacy?: unknown): AiSanctionPolicy {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> :
+    legacy && typeof legacy === 'object' ? legacy as Record<string, unknown> : {};
+  return {
+    warningExpiryDays:integer(raw['warningExpiryDays'],30,0,365),
+    muteAfterWarnings:integer(raw['muteAfterWarnings'],3,0,20),
+    muteDurationSeconds:integer(raw['muteDurationSeconds'],3600,60,2592000),
+    banAfterWarnings:integer(raw['banAfterWarnings'],0,0,50),
+  };
 }
 
 export function requiredRightsFor(blocks: ModeratorBlock[]) {

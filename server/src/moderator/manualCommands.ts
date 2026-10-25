@@ -80,7 +80,11 @@ export async function handleManualCommand(updateId: string, message: CommandMess
   } else if (command === 'unban') {
     await unbanChatUser(message.chat.id, target.id, token); await prisma.communityMember.updateMany({ where: { communityId: community.id, tgUserId: String(target.id) }, data: { status: 'ACTIVE', bannedAt: null } }); response = `${label(target)} разблокирован.`;
   } else if (command === 'info') {
-    const count = await activeWarningCount(community.id, String(target.id)); const member = await prisma.communityMember.findUnique({ where: { communityId_tgUserId: { communityId: community.id, tgUserId: String(target.id) } } }); response = `${label(target)}: предупреждений — ${count}; статус — ${member?.status ?? 'ACTIVE'}.`;
+    const [general, profanity, conversation, member] = await Promise.all([
+      activeWarningCount(community.id, String(target.id)), activeWarningCount(community.id, String(target.id), 'PROFANITY'), activeWarningCount(community.id, String(target.id), 'CONVERSATION'),
+      prisma.communityMember.findUnique({ where: { communityId_tgUserId: { communityId: community.id, tgUserId: String(target.id) } } }),
+    ]);
+    response = `${label(target)}: предупреждения за фильтры и команды — ${general}, за мат — ${profanity}, за конфликты — ${conversation}; статус — ${member?.status ?? 'ACTIVE'}.`;
   }
   if (command === 'unban') await revokeWarnings(community.id, String(target.id));
   await prisma.moderationEvent.update({ where: { id: event.id }, data: { status: 'PROCESSED', metadata: { command, actorTgUserId: String(message.from.id), response } } });

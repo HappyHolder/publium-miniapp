@@ -32,8 +32,9 @@ jobs:
         env:
           PULSE_TRANSITION_FIXTURE_OUTPUT: ../output/pulse-implementation-2026-10-11/transition-fixture.json
       - run: node server/scripts/security-smoke.mjs
-      - run: cd server && npx prisma migrate deploy && npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code && node scripts/audit-integration.mjs && node scripts/collaber-integration.mjs && node scripts/pulse-integration.mjs
+      - run: cd server && npx prisma migrate deploy && npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code && node scripts/audit-integration.mjs && node scripts/collaber-integration.mjs && npm run test:moderator:postgres && node scripts/pulse-integration.mjs
       - run: npm run test:frontend
         env:
           NODE_ENV: production
       - run: node scripts/smoke-pulse-history.mjs
+      - run: npm run test:moderator-ui

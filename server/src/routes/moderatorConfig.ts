@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
 import { verifyModeratorSession } from '../lib/moderatorSession';
-import { DEFAULT_BLOCKS, parseBlocks, requiredRightsFor, type ModeratorBlock } from '../moderator/config';
+import { DEFAULT_BLOCKS, isAiModeratorSection, mergeAiModeratorSection, parseBlocks, requiredRightsFor, type AiModerationBlock, type ModeratorBlock } from '../moderator/config';
 import { getBotIdFromToken, getChatMember, TelegramApiError } from '../lib/telegramBot';
 import { moderatorTokenForCommunity } from '../moderator/managedBotCrypto';
 import { buildStandaloneChatStyleContext, chatStyleRulesSnapshot } from '../moderator/chatStyleContext';
@@ -40,37 +40,45 @@ router.get('/:moderatorId/draft', async (req: Request, res: Response): Promise<v
   });
   res.json({
     moderator: context.moderator,
-    draft: draft ?? { version: context.moderator.draftVersion, status: 'DRAFT', blocks: DEFAULT_BLOCKS },
-    published,
+    draft: draft ? { ...draft, blocks: parseBlocks(draft.blocks) } : { version: context.moderator.draftVersion, status: 'DRAFT', blocks: DEFAULT_BLOCKS },
+    published: published ? { ...published, blocks: parseBlocks(published.blocks) } : null,
   });
 });
 
 router.patch('/:moderatorId/draft', async (req: Request, res: Response): Promise<void> => {
-  const { blocks: rawBlocks } = req.body as { blocks?: unknown };
+  const { blocks: rawBlocks, aiSection, settings } = req.body as { blocks?: unknown; aiSection?: unknown; settings?: unknown };
   let context;
   try { context = await ownedModerator(req, req.params['moderatorId'] ?? ''); } catch (err) { fail(res, err); return; }
-  let blocks: ModeratorBlock[];
-  try { blocks = parseBlocks(rawBlocks); } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid blocks' }); return;
+  if (aiSection !== undefined && (!isAiModeratorSection(aiSection) || !settings || typeof settings !== 'object' || Array.isArray(settings))) {
+    res.status(400).json({ error: 'Некорректные настройки раздела модерации.' }); return;
   }
-  const existing = await prisma.moderatorConfig.findUnique({ where: { moderatorId_version: { moderatorId: context.moderator.id, version: context.moderator.draftVersion } } });
-  const previous = existing ? parseBlocks(existing.blocks) : DEFAULT_BLOCKS;
-  const merged = [...previous.filter(old => !blocks.some(next => next.type === old.type)), ...blocks];
-  blocks = merged;
-  const draft = await prisma.moderatorConfig.upsert({
-    where: { moderatorId_version: { moderatorId: context.moderator.id, version: context.moderator.draftVersion } },
-    create: { moderatorId: context.moderator.id, version: context.moderator.draftVersion, blocks, createdById: context.user.id },
-    update: { blocks },
-  });
-  await prisma.moderator.update({
-    where: { id: context.moderator.id },
-    data: { requiredRights: requiredRightsFor(blocks) },
-  });
-  res.json({ draft });
+  try {
+    const draft = await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${context.moderator.id + ':config'}))`;
+      const current = await tx.moderator.findUniqueOrThrow({ where: { id: context.moderator.id } });
+      const existing = await tx.moderatorConfig.findUnique({ where: { moderatorId_version: { moderatorId: current.id, version: current.draftVersion } } });
+      const previous = existing ? parseBlocks(existing.blocks) : DEFAULT_BLOCKS;
+      let incoming: ModeratorBlock[];
+      if (isAiModeratorSection(aiSection)) {
+        const base = (previous.find(b => b.type === 'ai_moderation') ?? DEFAULT_BLOCKS.find(b => b.type === 'ai_moderation')) as AiModerationBlock;
+        incoming = parseBlocks([{ ...base, [aiSection]: { ...base[aiSection], ...settings as Record<string, unknown> } }]);
+      } else incoming = parseBlocks(rawBlocks);
+      const blocks = [...previous.filter(old => !incoming.some(next => next.type === old.type)), ...incoming];
+      return tx.moderatorConfig.upsert({ where: { moderatorId_version: { moderatorId: current.id, version: current.draftVersion } },
+        create: { moderatorId: current.id, version: current.draftVersion, blocks, createdById: context.user.id }, update: { blocks } });
+    });
+    res.json({ draft });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) throw error;
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Некорректные настройки' });
+  }
 });
 
 router.post('/:moderatorId/publish', async (req: Request, res: Response): Promise<void> => {
-  const { blockType } = req.body as { blockType?: unknown };
+  const { blockType, aiSection } = req.body as { blockType?: unknown; aiSection?: unknown };
+  if (aiSection !== undefined && (!isAiModeratorSection(aiSection) || blockType !== 'ai_moderation')) {
+    res.status(400).json({ error: 'Некорректный раздел модерации.' }); return;
+  }
   let context;
   try { context = await ownedModerator(req, req.params['moderatorId'] ?? ''); } catch (err) { fail(res, err); return; }
   const current = await prisma.moderatorConfig.findUnique({
@@ -84,10 +92,13 @@ router.post('/:moderatorId/publish', async (req: Request, res: Response): Promis
   let blocks = draftBlocks;
   if (blockType !== undefined) {
     if (typeof blockType !== 'string') { res.status(400).json({ error: 'Invalid blockType' }); return; }
-    const selected = draftBlocks.find(block => block.type === blockType);
+    let selected = draftBlocks.find(block => block.type === blockType);
     if (!selected) { res.status(400).json({ error: 'Указанный блок отсутствует в черновике' }); return; }
     const publishedConfig = context.moderator.publishedVersion == null ? null : await prisma.moderatorConfig.findUnique({ where: { moderatorId_version: { moderatorId: context.moderator.id, version: context.moderator.publishedVersion } } });
     const publishedBlocks = publishedConfig ? parseBlocks(publishedConfig.blocks) : DEFAULT_BLOCKS;
+    if (isAiModeratorSection(aiSection) && selected.type === 'ai_moderation') {
+      selected = mergeAiModeratorSection((publishedBlocks.find(b => b.type === 'ai_moderation') ?? DEFAULT_BLOCKS.find(b => b.type === 'ai_moderation')) as AiModerationBlock, selected, aiSection);
+    }
     blocks = [...publishedBlocks.filter(block => block.type !== selected.type), selected];
   }
   const requiredRights = requiredRightsFor(blocks);
@@ -133,6 +144,10 @@ router.post('/:moderatorId/publish', async (req: Request, res: Response): Promis
     && context.moderator.publishedVersion !== null;
   const nextVersion = current.version + 1;
   const result = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${context.moderator.id + ':config'}))`;
+    const fresh = await tx.moderator.findUniqueOrThrow({ where: { id: context.moderator.id } });
+    const freshDraft = await tx.moderatorConfig.findUnique({ where: { id: current.id } });
+    if (fresh.draftVersion !== current.version || JSON.stringify(freshDraft?.blocks) !== JSON.stringify(current.blocks)) return null;
     await tx.moderatorConfig.updateMany({ where: { moderatorId: context.moderator.id, status: 'PUBLISHED' }, data: { status: 'ARCHIVED' } });
     const published = await tx.moderatorConfig.update({
       where: { id: current.id },
@@ -158,6 +173,7 @@ router.post('/:moderatorId/publish', async (req: Request, res: Response): Promis
     });
     return { published, moderator };
   });
+  if (!result) { res.status(409).json({ error: 'Черновик изменился. Обновите настройки и примените раздел ещё раз.' }); return; }
   res.json(result);
 });
 

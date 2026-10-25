@@ -418,6 +418,12 @@ model ModeratorConversationMessage {
   telegramMessageId Int
   text              String
   replyToMessageId  Int?
+  replyToUserId     String?
+  replyToBot        Boolean   @default(false)
+  sanctionExempt    Boolean   @default(false)
+  sentAt            DateTime  @default(now())
+  evidenceEventId   String?
+  reviewedAt        DateTime?
   threadKey         String    @default("main")
   moderated         Boolean   @default(false)
   moderationSignal  Json?
@@ -498,6 +504,8 @@ model ModeratorConversationState {
   stage                 String    @default("NORMAL")
   messagesSinceAnalysis Int       @default(0)
   lastAnalyzedMessageId Int?
+  analysisLeaseId       String?
+  analysisLeaseUntil    DateTime?
   lastInterventionAt    DateTime?
   hourWindowStartedAt   DateTime?
   interventionsInWindow Int       @default(0)
@@ -1056,6 +1064,7 @@ model ModerationWarning {
   tgUserId    String
   reason      String
   source      String
+  scope       String    @default("GENERAL")
   eventId     String?
   expiresAt   DateTime?
   revokedAt   DateTime?
@@ -1063,6 +1072,8 @@ model ModerationWarning {
   community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
 
   @@index([communityId, tgUserId, createdAt])
+  @@index([communityId, tgUserId, scope, createdAt])
+  @@unique([eventId, tgUserId])
 }
 
 model ModerationEvent {

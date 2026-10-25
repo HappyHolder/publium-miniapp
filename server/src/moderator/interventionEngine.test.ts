@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { conversationCategoryForSignal, shouldAnalyzeConversation } from './interventionEngine.js';
+import { shouldAnalyzeConversation } from './interventionEngine.js';
 
-test('primary-handled violations feed episodes without a second AI response', () => {
-  assert.equal(shouldAnalyzeConversation({messageCount:8,messagesSinceAnalysis:8,isReply:true,hasActiveEpisode:true,moderated:true}),false);
+test('conversation analysis starts after the configured count of relevant messages', () => {
+  assert.equal(shouldAnalyzeConversation({messageCount:3,messagesSinceAnalysis:3,isReply:false,hasActiveEpisode:false,minMessages:3}),true);
+  assert.equal(shouldAnalyzeConversation({messageCount:2,messagesSinceAnalysis:2,isReply:false,hasActiveEpisode:false,minMessages:3}),false);
 });
 
 test('active episodes are analyzed adaptively without a global cooldown', () => {
-  assert.equal(shouldAnalyzeConversation({messageCount:2,messagesSinceAnalysis:1,isReply:false,hasActiveEpisode:true,moderated:false}),true);
+  assert.equal(shouldAnalyzeConversation({messageCount:2,messagesSinceAnalysis:1,isReply:false,hasActiveEpisode:true}),true);
 });
 
-test('a profanity verdict is stored but cannot create a conflict episode', () => {
-  assert.equal(conversationCategoryForSignal('profanity'), 'none');
-  assert.equal(conversationCategoryForSignal('toxicity'), 'toxicity');
+test('one isolated message cannot invent an ongoing conversation', () => {
+  assert.equal(shouldAnalyzeConversation({messageCount:1,messagesSinceAnalysis:1,isReply:true,hasActiveEpisode:true}),false);
 });

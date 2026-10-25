@@ -4,9 +4,9 @@ import { prisma } from '../db';
  * Owner-labelled AI decisions (👍/👎 in the journal, reversals) rendered as a
  * prompt section so the model adapts to this community without retraining.
  */
-export async function ownerFeedbackContext(communityId: string): Promise<string> {
+export async function ownerFeedbackContext(communityId: string, scope: 'PROFANITY' | 'CONVERSATION' = 'CONVERSATION'): Promise<string> {
   const events = await prisma.moderationEvent.findMany({
-    where: { communityId, feedback: { in: ['FALSE_POSITIVE', 'CONFIRMED'] }, eventType: { in: ['AI_INTERVENTION', 'AI_MODERATION_TRIGGERED'] } },
+    where: { communityId, feedback: { in: ['FALSE_POSITIVE', 'CONFIRMED'] }, eventType: { in: scope === 'PROFANITY' ? ['AI_MODERATION_TRIGGERED'] : ['AI_INTERVENTION', 'CONVERSATION_EPISODE'] } },
     orderBy: { createdAt: 'desc' },
     take: 5,
     select: { feedback: true, decision: true, reason: true },

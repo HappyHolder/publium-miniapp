@@ -25,12 +25,19 @@ export function pulseHour(date = new Date()): number {
   return Number.isFinite(h) ? h : 0;
 }
 
-type PulseModerationEvent = { eventType: string; action: string | null; decision: string | null; tgUserId: string | null; metadata: unknown };
+type PulseModerationEvent = { eventType: string; action: string | null; decision: string | null; tgUserId: string | null; metadata: unknown; feedback?: string | null; reversedAt?: Date | null };
 const pulseMeta = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
 
 /** Weighted harm signal. Spam affects cleanliness; directed harassment affects climate much more. */
 export function pulseToxicityWeight(event: PulseModerationEvent): number {
   const meta = pulseMeta(event.metadata), category = String(meta['category'] ?? event.decision ?? 'other'), severity = String(meta['severity'] ?? 'medium');
+  if (event.feedback === 'FALSE_POSITIVE' || event.reversedAt || meta['scope'] === 'PROFANITY') return 0;
+  if (meta['scope'] === 'CONVERSATION' && ['AI_INTERVENTION', 'CONVERSATION_EPISODE'].includes(event.eventType)) {
+    if (meta['state'] === 'RESOLVED') return 0;
+    const evidenceCount = new Set(Array.isArray(meta['evidenceMessageIds']) ? meta['evidenceMessageIds'].filter(Number.isInteger) : []).size;
+    const weights: Record<string, number> = { conflict: 1, toxicity: 1.2, harassment: 2, threat: 2.5 };
+    return evidenceCount * (weights[category] ?? 0) * (severity === 'high' ? 2.5 : severity === 'low' ? .5 : 1);
+  }
   if (event.eventType === 'CONVERSATION_EPISODE') {
     if (meta['source'] === 'MESSAGE_MODERATED') return 0;
     const state = String(meta['state'] ?? 'OBSERVING');
@@ -231,15 +238,16 @@ export async function rollupPulseDay(communityId: string, day: string): Promise<
   const to = new Date(from.getTime() + 86_400_000);
   const events = await prisma.moderationEvent.findMany({
     where: { communityId, createdAt: { gte: from, lt: to } },
-    select: { eventType: true, action: true, decision: true, tgUserId: true, metadata: true },
+    select: { eventType: true, action: true, decision: true, tgUserId: true, metadata: true, feedback: true, reversedAt: true },
   }).catch(() => []);
   const blockedMsgs = events.filter(e => (e.action ?? '').includes('DELETE')).length;
   const interventions = events.filter(e => e.eventType === 'AI_INTERVENTION').length;
-  const conversationEvents = events.filter(e => ['AI_INTERVENTION','CONVERSATION_EPISODE'].includes(e.eventType));
+  const conversationEvents = events.filter(e => ['AI_INTERVENTION','CONVERSATION_EPISODE'].includes(e.eventType) && e.feedback !== 'FALSE_POSITIVE' && !e.reversedAt);
   const conflictEvents = conversationEvents.filter(e => e.decision === 'conflict').length;
   const harassmentEvents = conversationEvents.filter(e => e.decision === 'harassment').length;
   const culturalRewrites = events.filter(e => e.eventType === 'AI_MODERATION_TRIGGERED' && typeof pulseMeta(e.metadata)['suggestedRewrite'] === 'string').length;
   const affectedUsers = new Set(events.flatMap(e => {
+    if (e.feedback === 'FALSE_POSITIVE' || e.reversedAt) return [];
     const meta = pulseMeta(e.metadata), targets = Array.isArray(meta['targetIds']) ? meta['targetIds'].flatMap(v => typeof v === 'string' ? [v] : []) : [];
     return [...targets, ...(e.tgUserId && pulseToxicityWeight(e) > 0 ? [e.tgUserId] : [])];
   })).size;

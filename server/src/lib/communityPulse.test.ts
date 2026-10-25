@@ -14,6 +14,18 @@ test('harassment weighs more than ordinary spam', () => {
   assert.ok(harassment > spam);
 });
 
+test('new profanity events do not masquerade as an interpersonal climate signal', () => {
+  assert.equal(pulseToxicityWeight({ eventType:'AI_MODERATION_TRIGGERED',action:'DELETE_REWRITE_NONE',decision:'profanity',tgUserId:'1',metadata:{scope:'PROFANITY',severity:'medium'} }),0);
+});
+
+test('fresh conduct has the same climate weight before and after delivering a notice', () => {
+  const event = { eventType:'CONVERSATION_EPISODE',action:'OBSERVE',decision:'conflict',tgUserId:'1',metadata:{scope:'CONVERSATION',severity:'medium',state:'ESCALATING',evidenceMessageIds:[1,1,2]} };
+  const observed=pulseToxicityWeight(event), delivered=pulseToxicityWeight({...event,eventType:'AI_INTERVENTION',action:'RESPOND'});
+  assert.equal(observed,2);assert.equal(delivered,observed);
+  assert.equal(pulseToxicityWeight({...event,feedback:'FALSE_POSITIVE'}),0);
+  assert.equal(pulseToxicityWeight({...event,reversedAt:new Date()}),0);
+});
+
 test('normalizes a Telegram participant identity for Pulse', () => {
   assert.deepEqual(normalizePulseParticipantIdentity({ username:' @stepan ', firstName:' Степан ', lastName:'  Иванов\n' }), {
     username:'stepan', displayName:'Степан Иванов',

@@ -106,3 +106,7 @@ in Telegram mode `AppContext` hydrates from `/api/auth/telegram` and `/api/posts
 ## Current operations (2026-09-12)
 
 Payments use TON only. See [deployment](deploy/README.md) and [remediation report](docs/audit-remediation-2026-09-12.md) for release checks, historical Stars notices and payment/publication reconciliation.
+
+## Moderator update (2026-10-25)
+
+Profanity handling and interpersonal conduct have independent settings, notices and sanction counters. The journal shows source messages and Russian labels. See [implementation and validation](docs/moderator-implementation-2026-10-25.md), [user guide](docs/support/03-community-manager-and-moderator.md#ai-модерация-и-вмешательства), and [deployment procedure](deploy/README.md).
