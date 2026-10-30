@@ -23,15 +23,14 @@ export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:strin
       prisma.collaberImport.findMany({where:{communityManagerId:id},select:{id:true,filename:true,status:true,total:true,skipped:true,processed:true,profiles:true,error:true,createdAt:true},orderBy:{createdAt:'desc'},take:10}),
     ]);
     const ctx=await collaberContext(id,true),executor=ctx?await communityManagerExecutor(ctx.manager.communityId).catch(()=>null):null;
-    const [searchable,publicProfiles,sent,matched,useful,introduced]=await Promise.all([
-      prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,sourceAt:{not:null}}}),
-      prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,publicMentions:true}}),
+    const [searchable,publicProfiles,sent,matched,useful]=await Promise.all([
+      prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,sourceAt:{not:null},membership:{not:'LEFT'}}}),
+      prisma.collaberProfile.count({where:{communityManagerId:id,searchable:true,forgotten:false,publicMentions:true,sourceAt:{not:null},membership:{not:'LEFT'}}}),
       prisma.collaberRequest.count({where:{communityManagerId:id,status:'SENT'}}),
       prisma.collaberRequest.count({where:{communityManagerId:id,status:'SENT',NOT:{candidates:{equals:[]}}}}),
       prisma.collaberRequest.count({where:{communityManagerId:id,feedback:'USEFUL'}}),
-      prisma.collaberInvite.count({where:{communityManagerId:id,status:'INTRODUCED'}}),
     ]);
-    res.json({profiles,total,page,requests,drafts,imports,stats:{searchable,publicProfiles,sent,matched,useful,introduced},entryUrl:executor?.username?'https://t.me/'+executor.username+'?start='+entryPayload(id):null});
+    res.json({profiles,total,page,requests,drafts,imports,stats:{searchable,publicProfiles,sent,matched,useful},entryUrl:executor?.username?'https://t.me/'+executor.username+'?start='+entryPayload(id):null});
   }));
   router.post('/imports',(req,res,next)=>upload(req,res,e=>{if(e)res.status(400).json({error:'Не удалось загрузить JSON. Максимальный размер — 10 МБ.'});else next()}),route(async(req,res,id)=>{
     if(!req.file)throw new Error('Выберите JSON-файл истории');

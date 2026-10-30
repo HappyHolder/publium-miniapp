@@ -3,7 +3,7 @@ import { collaberContext, ingestIntro } from './service';
 import { afterLiveIntro, propose, sendConsentPrompt } from './proposals';
 import { isQuietHour } from '../config';
 import { activeFacts, preferenceCommand, type IntroMessage } from './domain';
-import { processTelegramTask } from './telegram';
+import { processTelegramTask, retiredIntroductionCallback } from './telegram';
 import { deliverMatch } from './delivery';
 
 let running=false, lastPeriodic=0, lastDeliveryRetry=0;
@@ -14,11 +14,13 @@ export async function processCollaberJobs(){
     await prisma.collaberTask.updateMany({where:{status:'PROCESSING',leaseUntil:{lt:now}},data:{status:'PENDING',leaseUntil:null}});
     await prisma.collaberImport.updateMany({where:{status:'PROCESSING',leaseUntil:{lt:now}},data:{status:'PENDING',leaseUntil:null}});
     await prisma.collaberRequest.updateMany({where:{status:'SENDING',updatedAt:{lt:new Date(Date.now()-10*60000)}},data:{status:'UNCERTAIN',error:'Обработка прервалась. Проверьте доставку.'}});
-    await prisma.collaberInvite.updateMany({where:{status:'WAITING',expiresAt:{lt:now}},data:{status:'EXPIRED'}});
     const task=await prisma.collaberTask.findFirst({where:{status:'PENDING',runAfter:{lte:now}},orderBy:{createdAt:'asc'}});
     if(task){
       const claim=await prisma.collaberTask.updateMany({where:{id:task.id,status:'PENDING'},data:{status:'PROCESSING',attempts:{increment:1},leaseUntil:new Date(Date.now()+5*60000)}});
       if(claim.count)try{
+        if(task.kind==='INVITE_DELIVERY'||task.kind==='TELEGRAM'&&retiredIntroductionCallback((task.payload as any)?.callback?.data)){
+          await prisma.collaberTask.update({where:{id:task.id},data:{status:'CANCELLED',payload:{},leaseUntil:null,error:null}});return;
+        }
         const ctx=await collaberContext(task.communityManagerId);
         const privacyCommand=task.kind==='TELEGRAM'&&preferenceCommand(String((task.payload as any).text??''));
         if(!ctx||(!privacyCommand&&(!ctx.manager.enabled||!ctx.config.features.collaber.enabled))){await prisma.collaberTask.update({where:{id:task.id},data:{status:'CANCELLED',payload:{},leaseUntil:null}});return}

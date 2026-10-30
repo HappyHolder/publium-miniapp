@@ -26,7 +26,7 @@ export function parseArchive(raw:unknown, expectedChatId:string) {
   return {messages,skipped,total:root.messages.length};
 }
 export function preferenceCommand(text:string):'hide'|'show'|'forget'|'no_mentions'|null {
-  const t=text.trim().toLowerCase().replace(/[.!]+$/,'');
+  const t=text.trim().toLowerCase().replace(/[.!]+$/,'').replace(/^(\/(?:hide|show|forget))@[a-z0-9_]+$/,'$1');
   if(/^(?:\/forget|удали мои данные collaber|забудь мой профиль)$/.test(t))return'forget';
   if(/^(?:\/hide|не предлагай(?:те)? меня|не предлагать меня)$/.test(t))return'hide';
   if(/^(?:\/show|предлагай меня|хочу участвовать в подборе)$/.test(t))return'show';

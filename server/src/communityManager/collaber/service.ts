@@ -38,7 +38,7 @@ export async function profilePreference(managerId:string,userId:string,action:'h
       await tx.collaberRequest.updateMany({where:{communityManagerId:managerId,OR:[{tgUserId:userId},{candidates:{array_contains:[{tgUserId:userId}]}}]},data:{candidates:[],response:null,status:'CANCELLED'}});
       await tx.collaberRequest.updateMany({where:{communityManagerId:managerId,tgUserId:userId},data:{query:''}});
       await tx.collaberImport.updateMany({where:{communityManagerId:managerId,status:{not:'COMPLETED'}},data:{messages:[],status:'CANCELLED',leaseUntil:null}});
-      await tx.collaberTask.updateMany({where:{communityManagerId:managerId,kind:{not:'SUPPRESSION'},OR:[{payload:{path:['userId'],equals:userId}},{payload:{path:['message','userId'],equals:userId}}]},data:{payload:{},status:'CANCELLED'}});
+      await tx.collaberTask.updateMany({where:{communityManagerId:managerId,kind:{not:'SUPPRESSION'},OR:[{payload:{path:['userId'],equals:userId}},{payload:{path:['requesterId'],equals:userId}},{payload:{path:['candidateId'],equals:userId}},{payload:{path:['message','userId'],equals:userId}}]},data:{payload:{},status:'CANCELLED'}});
       await tx.collaberSession.deleteMany({where:{communityManagerId:managerId,tgUserId:userId}});
     });
   }else{
@@ -46,7 +46,7 @@ export async function profilePreference(managerId:string,userId:string,action:'h
     await prisma.collaberProfile.updateMany({where:{communityManagerId:managerId,tgUserId:userId},data:action==='no_mentions'?{publicMentions:false}: {searchable:action==='show',...(action==='show'?{forgotten:false}:{})}});
   }
   if(action==='forget')await prisma.collaberInvite.deleteMany({where:{communityManagerId:managerId,OR:[{requesterId:userId},{candidateId:userId}]}});
-  else if(action!=='show')await prisma.collaberInvite.updateMany({where:{communityManagerId:managerId,OR:[{requesterId:userId},{candidateId:userId}],status:{in:['WAITING','ACCEPTED']}},data:{status:'CANCELLED'}});
+  else if(action!=='show')await prisma.collaberInvite.updateMany({where:{communityManagerId:managerId,OR:[{requesterId:userId},{candidateId:userId}],status:{in:['PENDING_NOTIFICATION','WAITING','ACCEPTED']}},data:{status:'CANCELLED'}});
 }
 
 export async function ingestIntro(managerId:string,message:IntroMessage,config:CollaberConfig,manual=false,live=false){
@@ -90,26 +90,24 @@ export async function findCandidates(managerId:string,query:string,userId:string
   const expanded=query+' '+keywords;
   let cursor:string|undefined;const ranked:Array<{row:any;score:number;passages:string[]}>=[];
   let eligible=0,shortlisted=0,semantic=0,unverified=0,left=0;
-  const blocked=await prisma.collaberInvite.findMany({where:{communityManagerId:managerId,OR:[{requesterId:userId},{candidateId:userId}],updatedAt:{gt:new Date(Date.now()-30*86400000)}},select:{requesterId:true,candidateId:true}});
-  const excluded=new Set(blocked.map(x=>x.requesterId===userId?x.candidateId:x.requesterId));
   do{
     const rows=await prisma.collaberProfile.findMany({where:{communityManagerId:managerId,searchable:true,forgotten:false,tgUserId:{not:userId},...(publicOnly?{publicMentions:true}:{})},include:{participant:true},orderBy:{id:'asc'},take:200,...(cursor?{cursor:{id:cursor},skip:1}:{})});
     // Keep zero-score profiles too: small communities should not lose a provider to synonyms.
-    for(const row of rows){if(excluded.has(row.tgUserId)||row.membership==='LEFT')continue;eligible++;const {matches,passages}=rankProfileEvidence(expanded,{...row,facts:factsOf(row.facts)});ranked.push({row,score:matches.slice(0,3).reduce((n,x)=>n+x.score,0),passages})}
+    for(const row of rows){if(row.membership==='LEFT')continue;eligible++;const {matches,passages}=rankProfileEvidence(expanded,{...row,facts:factsOf(row.facts)});ranked.push({row,score:matches.slice(0,3).reduce((n,x)=>n+x.score,0),passages})}
     ranked.sort((a,b)=>b.score-a.score||(a.row.lastProposedAt?.getTime()??0)-(b.row.lastProposedAt?.getTime()??0));ranked.splice(30);
     cursor=rows.length===200?rows[rows.length-1].id:undefined;
   }while(cursor);
   shortlisted=ranked.length;
   const sources=ranked.map(x=>({id:x.row.id,intro:x.passages,introAt:x.row.sourceAt?.toISOString(),facts:factsOf(x.row.facts).map(f=>({kind:f.kind,text:f.evidence.slice(0,700),at:f.at,needsConfirmation:factNeedsConfirmation(f,config.freshnessDays)}))}));
   const decisions=sources.length?reviewDecisions(await collaberJson(managerId,'Проверка кандидатов',{system:REVIEW_PROMPT,prompt:JSON.stringify({query,requester,candidates:sources}),maxTokens:Math.min(6000,400+sources.length*200),timeoutMs:60000}),sources):[];
-  const selected=selectedDecisions(decisions).slice(0,publicOnly?2:3);
+  const selected=selectedDecisions(decisions);
   semantic=selected.length;
   const ctx=selected.length?await collaberContext(managerId):null;
   const executor=ctx&&verifyMembership?await communityManagerExecutor(ctx.manager.communityId):null;
   const readerToken=ctx&&executor?await membershipReaderToken(ctx.manager.communityId,ctx.chatId,executor.token):null;
   const introLinks=ctx?await profileIntroLinks(managerId,ctx.chatId,ranked.map(x=>x.row)):new Map<string,string>();
   const candidates:Candidate[]=[];
-  for(const decision of selected){
+  for(const decision of selected.slice(0,10)){
     const {row}=ranked.find(x=>x.row.id===decision.id)!;
     const sourceFact=factsOf(row.facts).find(f=>f.evidence.includes(decision.evidence));
     const fact:Fact=row.sourceText.includes(decision.evidence)&&row.sourceAt?{kind:'project',value:decision.evidence,evidence:decision.evidence,at:row.sourceAt.toISOString(),expiresAt:null,sourceMessageId:String(row.sourceMessageId??'')}:sourceFact!;
@@ -126,7 +124,7 @@ export async function findCandidates(managerId:string,query:string,userId:string
       await prisma.communityManagerParticipant.update({where:{id:row.participantId},data:{username:row.participant.username,displayName:row.participant.displayName}});
     }
     candidates.push({id:row.id,tgUserId:row.tgUserId,name:row.participant.displayName,username:row.participant.username,description:roleDescription(decision),reason:'По теме вашего запроса: «'+decision.evidence+'». '+(factNeedsConfirmation(fact,config.freshnessDays)?'Исторические сведения — актуальность проекта и готовность к сотрудничеству нужно уточнить.':'Возможности проекта и готовность к сотрудничеству стоит уточнить у автора.'),evidence:decision.evidence,at:fact.at,profileRevision:profileRevision(row),...(introLinks.has(row.id)?{introUrl:introLinks.get(row.id)}:{})});
-    if(candidates.length===3)break;
+    if(candidates.length===(publicOnly?2:3))break;
   }
   await prisma.communityManagerAction.create({data:{communityManagerId:managerId,decision:'SILENT',intent:'collaber_matching',reason:'Результат этапов подбора',status:unverified&&!candidates.length?'FAILED':'COMPLETED',metadata:{eligible,shortlisted,semantic,unverified,left,returned:candidates.length,publicOnly,verifyMembership,decisions:decisions.map(({id,role,fit,reasonCode})=>({id,role,fit,reasonCode,selected:selected.some(d=>d.id===id),returned:candidates.some(c=>c.id===id)}))}}});
   if(unverified&&!candidates.length)throw new Error('Не удалось проверить участие кандидатов в чате. Подбор будет повторён.');
@@ -141,13 +139,11 @@ export async function refreshCandidates(managerId:string,userId:string,raw:unkno
   const token=await membershipReaderToken(ctx.manager.communityId,ctx.chatId,executor.token);
   if(!token)throw new Error('Не удалось проверить участие кандидатов в чате. Подбор будет повторён.');
   const rows=await prisma.collaberProfile.findMany({where:{communityManagerId:managerId,id:{in:saved.map(c=>c.id)},tgUserId:{not:userId},searchable:true,forgotten:false,...(publicOnly?{publicMentions:true}:{})}});
-  const blocked=await prisma.collaberInvite.findMany({where:{communityManagerId:managerId,OR:[{requesterId:userId},{candidateId:userId}],updatedAt:{gt:new Date(Date.now()-30*86400000)}},select:{requesterId:true,candidateId:true}});
-  const excluded=new Set(blocked.map(x=>x.requesterId===userId?x.candidateId:x.requesterId));
   const links=await profileIntroLinks(managerId,ctx.chatId,rows);
   const result:Candidate[]=[];
   for(const candidate of saved){
     const row=rows.find(r=>r.id===candidate.id&&r.tgUserId===candidate.tgUserId);
-    if(!row||excluded.has(row.tgUserId))continue;
+    if(!row)continue;
     if(candidate.profileRevision&&candidate.profileRevision!==profileRevision(row))continue;
     if(!candidate.evidence||![row.sourceText,...factsOf(row.facts).map(f=>f.evidence)].some(t=>t.includes(candidate.evidence)))continue;
     const member=await getChatMember(ctx.chatId,Number(row.tgUserId),token).catch(()=>null);

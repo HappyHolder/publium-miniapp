@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:frontend": "npm run build && node scripts/smoke-frontend.mjs",
-    "test:moderator-ui": "node scripts/smoke-moderator.mjs"
+    "test:moderator-ui": "node scripts/smoke-moderator.mjs",
+    "test:collaber-ui": "node scripts/smoke-collaber.mjs"
   },
   "dependencies": {
     "@ton/core": "^0.63.1",

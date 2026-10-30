@@ -28,7 +28,7 @@ export function reviewDecisions(value:unknown,sources:ReviewSource[]):ReviewDeci
   return result;
 }
 export function selectedDecisions(decisions:ReviewDecision[]){
-  return [...decisions.filter(d=>d.fit==='direct'),...decisions.filter(d=>d.fit==='supporting')].slice(0,3);
+  return [...decisions.filter(d=>d.fit==='direct'),...decisions.filter(d=>d.fit==='supporting')];
 }
 export function roleDescription(d:ReviewDecision){
   const roles={provider:'Автор или представитель проекта / сервиса',integrator:'Помощь с реализацией и интеграцией',seeker:'Ищет партнёра для своей задачи',other:'Возможный партнёр'};

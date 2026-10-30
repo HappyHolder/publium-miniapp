@@ -38,3 +38,4 @@ jobs:
           NODE_ENV: production
       - run: node scripts/smoke-pulse-history.mjs
       - run: npm run test:moderator-ui
+      - run: npm run test:collaber-ui

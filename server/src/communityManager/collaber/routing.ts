@@ -44,9 +44,10 @@ export async function handleGroupCollaborationQuery(input:GroupQuery):Promise<bo
     if(input.replyToMessageId){
       const action=await prisma.communityManagerAction.findFirst({where:{communityManagerId:input.managerId,intent:'collaber',telegramMessageId:input.replyToMessageId,status:'COMPLETED',createdAt:{gte:new Date(Date.now()-86400000)}},select:{metadata:true}});
       const key=(action?.metadata as any)?.collaberKey;
-      const prior=typeof key==='string'?await prisma.collaberTask.findFirst({where:{id:key,communityManagerId:input.managerId,kind:'ROUTING'}}):null;
+      const prior=typeof key==='string'?await prisma.collaberTask.findFirst({where:{id:key,communityManagerId:input.managerId,kind:{in:['ROUTING','REFINEMENT']}}}):null;
       const p=prior?.payload as any;
       if(p?.userId===input.userId&&p.route?.kind==='CLARIFY')clarificationContext=p.text;
+      if(p?.userId===input.userId&&prior?.kind==='REFINEMENT'&&typeof p.query==='string')clarificationContext=p.query;
       if(!clarificationContext){
         const previous=await prisma.collaberRequest.findFirst({where:{communityManagerId:input.managerId,chatId:input.chatId,tgUserId:input.userId,telegramMessageId:input.replyToMessageId,status:'SENT',createdAt:{gte:new Date(Date.now()-86400000)}},select:{query:true}});
         clarificationContext=previous?.query;

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { parseCommunityManagerConfig } from './config';
 import { parseCollaber, DEFAULT_COLLABER } from './collaber/config';
 import { parseArchive, validateFacts, activeFacts, factsOf, factNeedsConfirmation, rankFacts, preferenceCommand, contactUrl, canAct, possibleIntro, isThirdPartyIntro, type IntroMessage } from './collaber/domain';
-import { entryPayload, parseEntry } from './collaber/telegram';
+import { entryPayload, parseEntry, refinementPayload, parseRefinement, retiredIntroductionCallback } from './collaber/telegram';
 import { matchPresentation } from './collaber/delivery';
 import { introQuery } from './collaber/proposals';
 import { introPassages, rankProfileEvidence, reviewedIds } from './collaber/matchingContext';
@@ -61,12 +61,37 @@ test('start link is authenticated and expires; changing manager breaks signature
 test('welcome entry remains valid without granting membership or exposing a profile',()=>{
  const payload=entryPayload('manager1');assert.equal(parseEntry(payload,Date.now()+366*86400000),'manager1');assert.equal(parseEntry(payload.replace('manager1','manager2')),null);
 });
+
+test('saved introduction switches cannot revive invitation buttons',()=>{
+ const config=parseCollaber({buttons:{introduce:true}});
+ assert.equal('introduce' in config.buttons,false);
+ const candidate={id:'p',tgUserId:'42',name:'Анна',username:'annatest',description:'Маркетолог',reason:'Продвижение',evidence:'Предлагаю продвижение.',at:message.at,introUrl:'https://t.me/c/123/17'};
+ for(const chatId of ['43','-100123']){
+  const result=matchPresentation({id:'r',chatId,query:'маркетолог',candidates:[candidate]},config);
+  assert.ok(result.keyboard.inline_keyboard.some(row=>row.some(b=>b.url?.startsWith('https://t.me/annatest?text='))));
+  assert.ok(result.keyboard.inline_keyboard.some(row=>row.some(b=>b.url===candidate.introUrl)));
+  assert.ok(result.keyboard.inline_keyboard.flat().every(b=>!retiredIntroductionCallback(b.callback_data)));
+ }
+});
+
+test('retired invitation callbacks are distinct from public visibility and search feedback',()=>{
+ for(const action of ['n','yes','no'])assert.equal(retiredIntroductionCallback(`cb:${action}:old:0`),true);
+ for(const data of [null,undefined,'cp:profile:public','cp:profile:private','cb:r:r:0','cb:i:r:0','cb:f:r:0','cb:good:r:0'])assert.equal(retiredIntroductionCallback(data),false);
+ const payload=refinementPayload('request1');assert.ok(payload.length<=64);assert.equal(parseRefinement(payload),'request1');assert.equal(parseRefinement(payload.replace('request1','request2')),null);
+});
+
+test('a profile without a public username keeps its intro without inventing a contact',()=>{
+ const candidate={id:'p',tgUserId:'42',name:'Анна',username:null,description:'Маркетолог',reason:'Продвижение',evidence:'Предлагаю продвижение.',at:message.at,introUrl:'https://t.me/c/123/17'};
+ const result=matchPresentation({id:'r',chatId:'-100123',query:'маркетолог',candidates:[candidate]},DEFAULT_COLLABER);
+ assert.ok(result.keyboard.inline_keyboard.flat().some(b=>b.url===candidate.introUrl));
+ assert.ok(result.keyboard.inline_keyboard.flat().every(b=>!b.text.startsWith('Написать')));
+});
 test('message respects image and button settings; interpolated text is escaped',()=>{
  const request={id:'c123',query:'кросс-промо',candidates:[{id:'p1',tgUserId:'42',name:'<script>Анна</script>',username:'annatest',description:'Проект <b>test</b>',reason:'Есть совпадение',evidence:'Источник',at:message.at}]};
  const config=parseCollaber({...DEFAULT_COLLABER,imageUrl:'https://example.com/cover.png',introduction:'<script>hello</script>'});
  const result=matchPresentation(request,config);assert.ok(!result.html.includes('<script>'));assert.ok(result.html.includes('&lt;script&gt;'));assert.ok(result.html.includes('cover.png'));
  for(const row of result.keyboard.inline_keyboard)for(const button of row)if(button.callback_data)assert.ok(Buffer.byteLength(button.callback_data)<=64);
- const plain=matchPresentation(request,{...config,showImage:false,buttons:{contact:false,intro:false,introduce:false,refine:false}});assert.ok(!plain.html.includes('cover.png'));assert.deepEqual(plain.keyboard.inline_keyboard,[]);
+ const plain=matchPresentation(request,{...config,showImage:false,buttons:{contact:false,intro:false,refine:false}});assert.ok(!plain.html.includes('cover.png'));assert.deepEqual(plain.keyboard.inline_keyboard,[]);
 });
 test('no candidates produces a useful empty state rather than invented people',()=>{
  const result=matchPresentation({id:'r',query:'задача',candidates:[]},{...DEFAULT_COLLABER,imageUrl:'https://example.com/cover.png'});assert.match(result.text,/не нашёл/);assert.ok(!result.html.includes('cover.png'));
@@ -91,7 +116,7 @@ test('rich result keeps names, description and reason in separate paragraphs',()
 
 test('group results can be configured as short, image-free replies with only intro buttons',()=>{
  const candidate={id:'p',tgUserId:'42',name:'Анна <b>',username:'test',description:'Дополнительно: интеграция',reason:'Причина',evidence:'Предлагаю помощь с интеграцией API. '.repeat(25),at:message.at,introUrl:'https://t.me/c/123/17'};
- const config={...DEFAULT_COLLABER,introduction:'',showImage:false,imageUrl:'https://example.com/cover.png',buttons:{contact:false,intro:true,introduce:false,refine:false}};
+ const config={...DEFAULT_COLLABER,introduction:'',showImage:false,imageUrl:'https://example.com/cover.png',buttons:{contact:false,intro:true,refine:false}};
  const result=matchPresentation({id:'r',chatId:'-100123',query:'интеграция',candidates:[candidate,candidate,candidate]},config);
  assert.ok(!result.html.includes('cover.png'));assert.ok(result.text.length<600);assert.ok(!result.text.includes('Источник:'));
  assert.equal(result.keyboard.inline_keyboard.length,2);
@@ -103,18 +128,18 @@ test('group results can be configured as short, image-free replies with only int
 test('group presentation honors saved cover, introduction and every button switch',()=>{
  const candidate={id:'p',tgUserId:'42',name:'Анна',username:'example_user',description:'Интеграция',reason:'Причина',evidence:'Подключаю API.',at:message.at,introUrl:'https://t.me/c/123/17'};
  const request={id:'r',chatId:'-100123',query:'интеграция',candidates:[candidate,candidate,candidate]};
- const config={...DEFAULT_COLLABER,showImage:true,imageUrl:'https://example.com/cover.png',introduction:'<Наш подбор>',buttons:{contact:true,intro:true,introduce:true,refine:true}};
+ const config={...DEFAULT_COLLABER,showImage:true,imageUrl:'https://example.com/cover.png',introduction:'<Наш подбор>',buttons:{contact:true,intro:true,refine:true}};
  const full=matchPresentation(request,config);
  assert.ok(full.html.includes('cover.png'));assert.ok(full.html.includes('&lt;Наш подбор&gt;'));assert.ok(full.text.startsWith(config.introduction));
- assert.equal(full.keyboard.inline_keyboard.length,8);
- assert.deepEqual(full.keyboard.inline_keyboard.slice(0,3).map(row=>row[0].text),['Написать Анна','Интро: Анна','Познакомить: Анна']);
- for(const key of ['contact','intro','introduce','refine'] as const){
-  const only=matchPresentation(request,{...config,buttons:{contact:false,intro:false,introduce:false,refine:false,[key]:true}});
+ assert.equal(full.keyboard.inline_keyboard.length,6);
+ assert.deepEqual(full.keyboard.inline_keyboard.slice(0,2).map(row=>row[0].text),['Написать Анна','Интро: Анна']);
+ for(const key of ['contact','intro','refine'] as const){
+  const only=matchPresentation(request,{...config,buttons:{contact:false,intro:false,refine:false,[key]:true}});
   assert.equal(only.keyboard.inline_keyboard.length,2);
-  const prefix={contact:'Написать',intro:'Интро:',introduce:'Познакомить:',refine:'Уточнить подбор'}[key];
+  const prefix={contact:'Написать',intro:'Интро:',refine:'Уточнить подбор'}[key];
   assert.ok(only.keyboard.inline_keyboard[0][0].text.startsWith(prefix));
  }
- const plain=matchPresentation(request,{...config,showImage:false,introduction:'',buttons:{contact:false,intro:false,introduce:false,refine:false}});
+ const plain=matchPresentation(request,{...config,showImage:false,introduction:'',buttons:{contact:false,intro:false,refine:false}});
  assert.ok(!plain.html.includes('cover.png'));assert.ok(!plain.text.includes(config.introduction));assert.deepEqual(plain.keyboard.inline_keyboard,[]);
 });
 test('candidate facts distinguish useful offers from irrelevant words',()=>{

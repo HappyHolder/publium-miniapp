@@ -12,7 +12,7 @@ const {DEFAULT_CM_CONFIG}=require('../dist/communityManager/config.js');
 const {ingestIntro,findCandidates,createMatch,profilePreference,queueLiveIntro}=require('../dist/communityManager/collaber/service.js');
 const {deliverMatch}=require('../dist/communityManager/collaber/delivery.js');
 const {processCollaberJobs}=require('../dist/communityManager/collaber/worker.js');
-const {processTelegramTask,acceptCollaberUpdate,entryPayload}=require('../dist/communityManager/collaber/telegram.js');
+const {processTelegramTask,acceptCollaberUpdate,entryPayload,refinementPayload}=require('../dist/communityManager/collaber/telegram.js');
 const {issueModeratorSession}=require('../dist/lib/moderatorSession.js');
 const express=require('express');
 const originalFetch=globalThis.fetch;
@@ -32,6 +32,7 @@ telegram.sendBotMessage=async(chat,text,token,keyboard,parseMode,replyId)=>{send
 ai.collaberJson=async(managerId,stage,{prompt,system})=>{
  const p=JSON.parse(prompt);
  if(system.startsWith('Extract'))return {facts:[{kind:'offer',value:p.message,evidence:p.message}],closedNeedsEvidence:null};
+ if(system.startsWith('Classify'))return {kind:'SEARCH',query:(p.clarificationContext??'')+' '+p.text};
  if(system.startsWith('Given'))return{keywords:['маркетинг','продвижение']};
  if(system.startsWith('Rank'))return fixtureReview(p,noMatches?[]:p.candidates.slice(0,3).map(x=>x.id));
  throw new Error('Unexpected inference');
@@ -128,30 +129,78 @@ try{
  const beforeForeign=sends;
  await processTelegramTask(task('99','cb:f:'+request.id+':0'));
  assert.equal(sends,beforeForeign);assert.equal((await prisma.collaberRequest.findUnique({where:{id:request.id}})).feedback,null);
- const introClick=uid=>({update_id:8675300+Number(uid),callback_query:{id:'click-'+uid,from:{id:Number(uid)},data:'cb:n:'+request.id+':0',message:{chat:{id:chat.tgChatId,type:'supergroup'}}}});
- await acceptCollaberUpdate(introClick('99'),{type:'SHARED',botId:100});
- assert.equal(callbackAnswers.at(-1).show_alert,true);assert.match(callbackAnswers.at(-1).text,/автора подбора/);
- await acceptCollaberUpdate(introClick('43'),{type:'SHARED',botId:100});
- assert.ok(callbackAnswers.at(-1).url.includes('?start=co_'));assert.equal(sends,beforeForeign);
- await processTelegramTask(task('43','cb:n:'+request.id+':0'));assert.equal(sends,beforeForeign);
+ const invite=await prisma.collaberInvite.create({data:{communityManagerId:manager.id,pairKey:'42:43',requesterId:'43',candidateId:'42',requestId:request.id,status:'WAITING',expiresAt:new Date(Date.now()+86400000)}});
+ const retiredClick=(uid,kind,id)=>({update_id:8675300+Number(uid),callback_query:{id:'click-'+uid+'-'+kind,from:{id:Number(uid)},data:'cb:'+kind+':'+id+':0',message:{chat:{id:chat.tgChatId,type:'supergroup'}}}});
+ for(const [kind,id] of [['n',request.id],['yes',invite.id],['no',invite.id]])for(const uid of ['43','42','99']){
+  const queued=await prisma.collaberTask.count({where:{communityManagerId:manager.id,kind:'TELEGRAM'}});
+  assert.equal(await acceptCollaberUpdate(retiredClick(uid,kind,id),{type:'SHARED',botId:100}),true);
+  assert.match(callbackAnswers.at(-1).text,/отключены/);
+  assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,kind:'TELEGRAM'}}),queued);
+  await processTelegramTask(task(uid,'cb:'+kind+':'+id+':0'));
+ }
+ assert.equal(sends,beforeForeign);assert.equal((await prisma.collaberInvite.findUnique({where:{id:invite.id}})).status,'WAITING');
+ const directCandidates=await findCandidates(manager.id,'маркетинг','43',config.features.collaber,true,false);
+ assert.ok(directCandidates.some(c=>c.tgUserId==='42'),'Old invitation must not suppress direct search');
+ assert.ok((await refreshCandidates(manager.id,'43',directCandidates,true)).some(c=>c.tgUserId==='42'),'Old invitation must not suppress saved recommendations');
+ const retiredTasks=await Promise.all([
+  prisma.collaberTask.create({data:{communityManagerId:manager.id,kind:'TELEGRAM',dedupeKey:'retired-callback-'+tag,payload:{callback:{data:'cb:yes:'+invite.id+':0'}}}}),
+  prisma.collaberTask.create({data:{communityManagerId:manager.id,kind:'INVITE_DELIVERY',dedupeKey:'retired-delivery-'+tag,payload:{inviteId:invite.id}}})
+ ]);
+ await prisma.communityManager.update({where:{id:manager.id},data:{enabled:false}});
+ for(let i=0;i<4&&await prisma.collaberTask.count({where:{id:{in:retiredTasks.map(t=>t.id)},status:'PENDING'}});i++)await processCollaberJobs();
+ assert.equal(await prisma.collaberTask.count({where:{id:{in:retiredTasks.map(t=>t.id)},status:'CANCELLED',payload:{equals:{}}}}),2);
+ assert.equal(sends,beforeForeign);
+ await prisma.communityManager.update({where:{id:manager.id},data:{enabled:true}});
  await processTelegramTask(task('43',null,'/start '+entryPayload(manager.id)));
- const beforeUnavailable=sends;
- await acceptCollaberUpdate(introClick('43'),{type:'SHARED',botId:100});
- assert.equal(callbackAnswers.at(-1).show_alert,true);assert.match(callbackAnswers.at(-1).text,/не подключил/);assert.equal(sends,beforeUnavailable);
  await processTelegramTask(task('42',null,'/start '+entryPayload(manager.id)));
- const beforeInvite=deliveries.length;
- await processTelegramTask(task('43','cb:n:'+request.id+':0'));
- assert.deepEqual(deliveries.slice(beforeInvite).map(d=>d.chat),['42','43'],'invitation and confirmation must both be private');
- const invite=await prisma.collaberInvite.findFirst({where:{communityManagerId:manager.id,pairKey:'42:43'}});assert.equal(invite.status,'WAITING');
- await processTelegramTask(task('99','cb:yes:'+invite.id+':0'));
- assert.equal((await prisma.collaberInvite.findUnique({where:{id:invite.id}})).status,'WAITING');
- await processTelegramTask(task('42','cb:yes:'+invite.id+':0'));
- assert.equal((await prisma.collaberInvite.findUnique({where:{id:invite.id}})).status,'INTRODUCED');
- const afterAccept=sends;await processTelegramTask(task('42','cb:yes:'+invite.id+':0'));assert.equal(sends,afterAccept);
+ await processTelegramTask(task('43','cb:r:'+request.id+':0'));
+ assert.ok(deliveries.at(-1).keyboard.inline_keyboard[0][0].url.includes('?start=cr_'));
+ const hint=await prisma.collaberTask.findFirst({where:{communityManagerId:manager.id,kind:'REFINEMENT'}});assert.equal(hint.payload.query,request.query);
+ const privateRefine=refinementPayload(request.id);
+ const wrongRefine={update_id:8675388,message:{message_id:99,chat:{type:'private',id:99},from:{id:99,first_name:'Other'},text:'/start '+privateRefine}};
+ assert.equal(await acceptCollaberUpdate(wrongRefine,{type:'SHARED',botId:100}),false);
+ await processTelegramTask(task('43',null,'/start '+privateRefine));
+ assert.equal((await prisma.collaberSession.findUnique({where:{botId_tgUserId:{botId:'100',tgUserId:'43'}}})).state,'REFINE');
+ const refineTask=task('43',null,'Именно с опытом TON');await processTelegramTask(refineTask);
+ const refined=await prisma.collaberRequest.findUnique({where:{dedupeKey:refineTask.id}});assert.ok(refined.query.includes(request.query));assert.match(refined.query,/TON/);
+ await processTelegramTask(task('43',null,'/search'));
+ const reset=await prisma.collaberSession.findUnique({where:{botId_tgUserId:{botId:'100',tgUserId:'43'}}});assert.equal(reset.state,'SEARCH');assert.equal(reset.query,'');
+ console.log('PASS retired buttons and queued deliveries send nothing; historical invites do not suppress direct search; signed refinement preserves the author and query');
  const webhook={update_id:8675309,message:{message_id:99,chat:{type:'private',id:43},from:{id:43,first_name:'Tester'},text:'/start '+entryPayload(manager.id)}};
  await acceptCollaberUpdate(webhook,{type:'SHARED',botId:100});await acceptCollaberUpdate(webhook,{type:'SHARED',botId:100});
  assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,dedupeKey:'telegram:100:8675309'}}),1);
- console.log('PASS callback ownership, two-party consent, repeated acceptance and webhook deduplication');
+ console.log('PASS callback ownership and webhook deduplication');
+
+ const reserveProfiles=[];const reserveInference=ai.collaberJson,reserveMembership=telegram.getChatMember;
+ try{
+  for(const uid of ['881','882']){
+   await ingestIntro(manager.id,{...intro,id:uid,userId:uid,name:'Reserve '+uid},config.features.collaber);
+   await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:uid},data:{publicMentions:true}});
+   reserveProfiles.push(await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:uid}}}));
+  }
+  const first=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
+  const ids=[first.id,...reserveProfiles.map(p=>p.id)];
+  ai.collaberJson=async(mid,stage,input)=>{
+   if(!input.system.startsWith('Rank'))return reserveInference(mid,stage,input);
+   const output=fixtureReview(JSON.parse(input.prompt),ids);output.decisions.sort((a,b)=>ids.indexOf(a.id)-ids.indexOf(b.id));return output;
+  };
+  telegram.getChatMember=async(chat,uid,token)=>Number(uid)===42?{status:'left',user:{id:42}}:reserveMembership(chat,uid,token);
+  const replacement=await findCandidates(manager.id,'маркетинг','43',config.features.collaber,true,true);
+  assert.equal(replacement.length,2);assert.deepEqual(new Set(replacement.map(c=>c.tgUserId)),new Set(['881','882']));
+ }finally{
+  ai.collaberJson=reserveInference;telegram.getChatMember=reserveMembership;
+  await prisma.collaberProfile.deleteMany({where:{id:{in:reserveProfiles.map(p=>p.id)}}});
+  await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'42'},data:{membership:'MEMBER'}});
+ }
+ console.log('PASS departed top candidate is replaced by eligible reserves without exceeding the two-person group limit');
+
+ const hideInGroup=task('42',null,'/hide@fixture_bot');hideInGroup.payload.chatId=chat.tgChatId;await processTelegramTask(hideInGroup);
+ assert.equal(deliveries.at(-1).chat,chat.tgChatId);assert.equal((await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}})).searchable,false);
+ const showInGroup=task('42',null,'/show@fixture_bot');showInGroup.payload.chatId=chat.tgChatId;await processTelegramTask(showInGroup);
+ assert.equal(deliveries.at(-1).chat,chat.tgChatId);assert.equal((await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}})).searchable,true);
+ console.log('PASS active group privacy commands acknowledge in the source chat without requiring private onboarding');
+
+
 
 
  // Group-first onboarding uses actual source message IDs and no private session.
@@ -159,7 +208,7 @@ try{
  config.features.collaber.initiatives='auto';config.features.collaber.periodicDays=0;config.features.collaber.maxInitiativesPerDay=5;
  config.features.collaber.imageUrl='https://example.com/cover.png';
  config.features.collaber.showImage=false;config.features.collaber.introduction='';
- config.features.collaber.buttons={contact:false,intro:true,introduce:false,refine:false};
+ config.features.collaber.buttons={contact:false,intro:true,refine:false};
  config.replies.conversationMemory=true;await saveConfig();
  await ingestIntro(manager.id,{...intro,id:'600',userId:'60',at:new Date().toISOString()},config.features.collaber);
  await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id,tgUserId:'60'},data:{publicMentions:true}});
@@ -220,7 +269,7 @@ try{
  await processTelegramTask(task('58','cb:good:'+empty.id+':0'));
  assert.equal((await prisma.collaberRequest.findUnique({where:{id:empty.id}})).feedback,null);
  const resultsData=await (await fetch(base+manager.id+'/collaber',{headers})).json();
- assert.ok(resultsData.stats.sent>resultsData.stats.matched);assert.ok(resultsData.requests.every(r=>!['PREVIEW','DRAFT'].includes(r.status)));
+ assert.equal('introduced' in resultsData.stats,false);assert.ok(resultsData.stats.sent>resultsData.stats.matched);assert.ok(resultsData.requests.every(r=>!['PREVIEW','DRAFT'].includes(r.status)));
  console.log('PASS private-only consent, silent empty group match, plain empty personal reply, feedback guard and meaningful owner statistics');
  await prisma.collaberProfile.updateMany({where:{communityManagerId:manager.id},data:{publicMentions:false}});
  await queueLiveIntro(manager.id,{message_id:703,from:{id:59,first_name:'Олег'},text:'#intro Меня зовут Олег. Предлагаю продвижение мини-приложений.',date:Math.floor(Date.now()/1000)});
@@ -341,6 +390,15 @@ try{
  await processTelegramTask(task('44',null,'/forget'));
  assert.equal((await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'44'}}})).forgotten,true);assert.equal(sends,beforePrivacy);
  console.log('PASS manager pause blocks new matching');
+
+ const groupPrivacy=(uid,text,id)=>({update_id:id,message:{message_id:id,chat:{id:Number(chat.tgChatId),type:'supergroup'},from:{id:Number(uid),first_name:'Fixture'},text}});
+ assert.equal(await acceptCollaberUpdate(groupPrivacy('42','/hide@other_bot',8675500),{type:'SHARED',botId:100}),false);
+ assert.equal(await acceptCollaberUpdate(groupPrivacy('42','/hide@fixture_bot',8675501),{type:'SHARED',botId:100}),true);
+ for(let i=0;i<4;i++)await processCollaberJobs();
+ assert.equal((await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}})).searchable,false);
+ assert.equal(sends,beforePrivacy);
+ console.log('PASS group hide works while paused and commands addressed to another bot are ignored');
+
 }finally{
  if(httpServer)await new Promise(resolve=>httpServer.close(resolve));
  if(community)await prisma.community.delete({where:{id:community.id}});

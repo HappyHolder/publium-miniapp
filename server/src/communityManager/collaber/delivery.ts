@@ -21,11 +21,10 @@ export function matchPresentation(request:{id:string;query:string;candidates:unk
     if(candidates.some(c=>c.reason.includes('Исторические сведения')))paragraphs.push('Актуальность этих сведений стоит уточнить у автора.');
   }else paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
   const keyboard:TelegramInlineKeyboard={inline_keyboard:[]};
-  candidates.forEach((candidate,index)=>{
+  candidates.forEach(candidate=>{
     const url=contactUrl(candidate.username,request.initiative?'возможное сотрудничество по твоему интро':request.query);
     if(config.buttons.contact&&url)keyboard.inline_keyboard.push([{text:('Написать '+candidate.name).slice(0,60),url}]);
     if(config.buttons.intro&&candidate.introUrl)keyboard.inline_keyboard.push([{text:('Интро: '+candidate.name).slice(0,60),url:candidate.introUrl}]);
-    if(config.buttons.introduce)keyboard.inline_keyboard.push([{text:('Познакомить: '+candidate.name).slice(0,60),callback_data:`cb:n:${request.id}:${index}`}]);
   });
   if(config.buttons.refine)keyboard.inline_keyboard.push([{text:'Уточнить подбор',callback_data:`cb:r:${request.id}:0`},...(candidates.length?[{text:'Не подходит',callback_data:`cb:f:${request.id}:0`}]:[])]);
   if(config.buttons.refine&&candidates.length)keyboard.inline_keyboard.push([{text:'Полезный подбор',callback_data:`cb:good:${request.id}:0`}]);
@@ -66,7 +65,7 @@ async function deliverMessageLocked(managerId:string,chatId:string,text:string,k
   let action:{id:string}|undefined;
   let dispatched=false;
   try{
-    action=await prisma.communityManagerAction.create({data:{communityManagerId:managerId,decision:'SENDING',intent:'collaber',reason:'Подбор и знакомства',response:html?text.slice(0,5000):null,metadata:{collaberKey:key??'',addressedToManager:!initiative},status:'SENDING'}});
+    action=await prisma.communityManagerAction.create({data:{communityManagerId:managerId,decision:'SENDING',intent:'collaber',reason:'Подбор участников',response:html?text.slice(0,5000):null,metadata:{collaberKey:key??'',addressedToManager:!initiative},status:'SENDING'}});
     const current=await collaberContext(managerId);
     if(!current?.manager.enabled||!current.config.features.collaber.enabled||current.manager.publishedVersion!==ctx.manager.publishedVersion)throw new Error('Настройки изменились, повторите действие');
     await beforeDispatch?.();

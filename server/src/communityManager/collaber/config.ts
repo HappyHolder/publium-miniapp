@@ -3,7 +3,7 @@ export type CollaberConfig = {
   collectIntros: boolean; onDemand: boolean; initiatives: 'off'|'drafts'|'auto';
   periodicDays: number; maxInitiativesPerDay: number; freshnessDays: number;
   imageUrl: string; showImage: boolean; introduction: string;
-  buttons: { contact: boolean; intro: boolean; introduce: boolean; refine: boolean };
+  buttons: { contact: boolean; intro: boolean; refine: boolean };
 };
 export const DEFAULT_COLLABER: CollaberConfig = {
   version: 1, enabled: false, communityType: 'Профессиональное сообщество',
@@ -11,7 +11,7 @@ export const DEFAULT_COLLABER: CollaberConfig = {
   onDemand: true, initiatives: 'drafts', periodicDays: 7, maxInitiativesPerDay: 1,
   freshnessDays: 90, imageUrl: '', showImage: true,
   introduction: 'Вот с кем можно обсудить сотрудничество:',
-  buttons: { contact: true, intro: true, introduce: true, refine: true },
+  buttons: { contact: true, intro: true, refine: true },
 };
 export function parseCollaber(raw: unknown): CollaberConfig {
   const r = raw && typeof raw === 'object' ? raw as Record<string, any> : {};
@@ -23,6 +23,6 @@ export function parseCollaber(raw: unknown): CollaberConfig {
     collectIntros:bool(r.collectIntros,true), onDemand:bool(r.onDemand,true), initiatives:['off','drafts','auto'].includes(r.initiatives)?r.initiatives:'drafts',
     periodicDays:integer(r.periodicDays,7,0,30), maxInitiativesPerDay:integer(r.maxInitiativesPerDay,1,0,5), freshnessDays:integer(r.freshnessDays,90,7,365),
     imageUrl:/^(https:\/\/|\/uploads\/)/.test(image)?image:'', showImage:bool(r.showImage,true), introduction:text(r.introduction,DEFAULT_COLLABER.introduction,300),
-    buttons:{contact:bool(r.buttons?.contact,true),intro:bool(r.buttons?.intro,true),introduce:bool(r.buttons?.introduce,true),refine:bool(r.buttons?.refine,true)},
+    buttons:{contact:bool(r.buttons?.contact,true),intro:bool(r.buttons?.intro,true),refine:bool(r.buttons?.refine,true)},
   };
 }
