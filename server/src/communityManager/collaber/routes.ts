@@ -6,7 +6,9 @@ import { collaberContext, createMatch, ingestIntro, profilePreference } from './
 import { communityManagerExecutor } from '../managedBot';
 import { entryPayload } from './telegram';
 import { deliverMatch, emptyMatchText, matchPresentation } from './delivery';
+import { withCollaberDeliveryLock } from './lock';
 
+const requestSummary={id:true,query:true,candidates:true,status:true,initiative:true,sourceMessageId:true,telegramMessageId:true,feedback:true,error:true,createdAt:true,updatedAt:true} as const;
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1,fields:2}}).single('file');
 export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:string)=>Promise<any>,fail:(res:Response,e:unknown)=>void){
   const router=Router({mergeParams:true});
@@ -18,8 +20,8 @@ export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:strin
     const [profiles,total,requests,drafts,imports]=await Promise.all([
       prisma.collaberProfile.findMany({where,include:{participant:{select:{displayName:true,username:true}}},orderBy:{updatedAt:'desc'},skip:page*25,take:25}),
       prisma.collaberProfile.count({where}),
-      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:{notIn:['DRAFT','PREVIEW']}},orderBy:{createdAt:'desc'},take:30}),
-      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:'DRAFT'},orderBy:{createdAt:'desc'},take:30}),
+      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:{notIn:['DRAFT','PREVIEW']}},select:requestSummary,orderBy:{createdAt:'desc'},take:30}),
+      prisma.collaberRequest.findMany({where:{communityManagerId:id,status:'DRAFT'},select:requestSummary,orderBy:{createdAt:'desc'},take:30}),
       prisma.collaberImport.findMany({where:{communityManagerId:id},select:{id:true,filename:true,status:true,total:true,skipped:true,processed:true,profiles:true,error:true,createdAt:true},orderBy:{createdAt:'desc'},take:10}),
     ]);
     const ctx=await collaberContext(id,true),executor=ctx?await communityManagerExecutor(ctx.manager.communityId).catch(()=>null):null;
@@ -60,7 +62,7 @@ export function registerCollaberRoutes(parent:Router,owned:(req:Request,id:strin
     }
     // Owner can hide profiles, but cannot override a participant's opt-out.
     if(req.body?.searchable===false)await profilePreference(id,row.tgUserId,'hide');
-    if(typeof req.body?.publicMentions==='boolean')await prisma.collaberProfile.update({where:{id:row.id},data:{publicMentions:req.body.publicMentions&&!row.forgotten}});
+    if(typeof req.body?.publicMentions==='boolean')await withCollaberDeliveryLock(id,()=>prisma.collaberProfile.updateMany({where:{id:row.id,forgotten:false},data:{publicMentions:req.body.publicMentions}}));
     res.json({ok:true});
   }));
   router.post('/preview',route(async(req,res,id)=>{

@@ -1138,6 +1138,7 @@ model CommunityManager {
   collaberRequests     CollaberRequest[]
   collaberSessions     CollaberSession[]
   collaberInvites      CollaberInvite[]
+  collaberExposures    CollaberExposure[]
 }
 
 model CollaberProfile {
@@ -1158,6 +1159,7 @@ model CollaberProfile {
   updatedAt          DateTime @updatedAt
   manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
   participant        CommunityManagerParticipant @relation(fields:[participantId], references:[id], onDelete:Cascade)
+  exposures          CollaberExposure[]
   @@unique([communityManagerId, tgUserId])
   @@index([communityManagerId, searchable, sourceAt])
 }
@@ -1209,6 +1211,16 @@ model CollaberRequest {
   sourceMessageId    Int?
   query              String
   candidates         Json @default("[]")
+  candidatePool      Json @default("[]")
+  examinedIds        Json @default("[]")
+  seenIds            Json @default("[]")
+  pages              Json @default("[]")
+  pageIndex          Int @default(0)
+  pageVersion        Int @default(0)
+  poolExhausted      Boolean @default(true)
+  originRequestId    String?
+  presentationConfig Json?
+  deliveryBotId      String?
   status             String @default("READY")
   initiative         Boolean @default(false)
   response           String?
@@ -1218,7 +1230,27 @@ model CollaberRequest {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  originRequest      CollaberRequest? @relation("CollaberSearchViews", fields:[originRequestId], references:[id], onDelete:Cascade)
+  privateViews       CollaberRequest[] @relation("CollaberSearchViews")
+  exposures          CollaberExposure[]
   @@index([communityManagerId, createdAt])
+  @@index([originRequestId])
+}
+
+model CollaberExposure {
+  id                 String @id @default(cuid())
+  communityManagerId String
+  profileId          String
+  requestId          String
+  requesterId        String
+  public             Boolean
+  createdAt          DateTime @default(now())
+  manager            CommunityManager @relation(fields:[communityManagerId], references:[id], onDelete:Cascade)
+  profile            CollaberProfile @relation(fields:[profileId], references:[id], onDelete:Cascade)
+  request            CollaberRequest @relation(fields:[requestId], references:[id], onDelete:Cascade)
+  @@unique([requestId, profileId])
+  @@index([communityManagerId, public, createdAt])
+  @@index([requesterId, createdAt])
 }
 
 model CollaberSession {

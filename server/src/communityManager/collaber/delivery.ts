@@ -1,31 +1,40 @@
 import { prisma } from '../../db';
 import { env } from '../../env';
-import { sendRichMessage, sendBotMessage, type TelegramInlineKeyboard } from '../../lib/telegramBot';
+import { sendRichMessage, sendBotMessage, telegramAction, TelegramApiError, type TelegramInlineKeyboard } from '../../lib/telegramBot';
 import { blocksToRichHtml, type PostBlock } from '../../lib/richPost';
 import { reserveSubscriptionQuota, refundSubscriptionQuota } from '../../lib/subscriptionLimits';
 import { communityManagerExecutor } from '../managedBot';
 import { isQuietHour } from '../config';
-import { collaberContext, refreshCandidates, profileRevision, type Candidate } from './service';
+import { collaberContext, type Candidate } from './service';
 import { contactUrl } from './domain';
-import { memberAccess } from './telegram';
 import type { CollaberConfig } from './config';
+import { COLLABER_PAGE_SIZE } from './distribution';
+import { withCollaberDeliveryLock } from './lock';
+import { deliverInitialMatch } from './pages';
 
-export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean;chatId?:string},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
+export function matchPresentation(request:{id:string;query:string;candidates:unknown;initiative?:boolean;chatId?:string;pageIndex?:number;pageVersion?:number;hasMore?:boolean;hasPrevious?:boolean;privateUrl?:string},config:CollaberConfig,emptyText='Пока не нашёл подходящих людей для этой задачи. Можно уточнить нужную помощь или вернуться к поиску после появления новых интро.'){
   const isGroup=Boolean(request.chatId?.startsWith('-'));
   const allCandidates=Array.isArray(request.candidates)?request.candidates as Candidate[]:[];
-  const candidates=isGroup?allCandidates.slice(0,2):allCandidates;
+  const candidates=allCandidates.slice(0,COLLABER_PAGE_SIZE);
   let paragraphs:string[];
   if(isGroup){
     const short=(value:string,max:number)=>value.length<=max?value:value.slice(0,max-1).replace(/\s+\S*$/u,'')+'…';
-    paragraphs=candidates.length?[config.introduction,...candidates.map(c=>`${short(c.name,60)}${c.description.startsWith('Дополнительно:')?' — дополнительно':''}\n«${short(c.evidence.replace(/\s+/gu,' ').trim(),220)}»`)]:[emptyText];
+    paragraphs=candidates.length?[config.introduction,...candidates.map(c=>`${short(c.name,60)}${c.description.startsWith('Дополнительно:')?' — дополнительно':''}\n«${short(c.evidence.replace(/\s+/gu,' ').trim(),120)}»`)]:[emptyText];
     if(candidates.some(c=>c.reason.includes('Исторические сведения')))paragraphs.push('Актуальность этих сведений стоит уточнить у автора.');
   }else paragraphs=candidates.length?[config.introduction,...candidates.map((c,i)=>`${i+1}. ${c.name}\n${c.description}\n${request.initiative?c.reason.replace('По теме вашего запроса:', 'Возможная точка сотрудничества:'):c.reason}\nИсточник: интро от ${new Date(c.at).toLocaleDateString('ru-RU')}`)]:[emptyText];
   const keyboard:TelegramInlineKeyboard={inline_keyboard:[]};
   candidates.forEach(candidate=>{
+    const row:TelegramInlineKeyboard['inline_keyboard'][number]=[];
     const url=contactUrl(candidate.username,request.initiative?'возможное сотрудничество по твоему интро':request.query);
-    if(config.buttons.contact&&url)keyboard.inline_keyboard.push([{text:('Написать '+candidate.name).slice(0,60),url}]);
-    if(config.buttons.intro&&candidate.introUrl)keyboard.inline_keyboard.push([{text:('Интро: '+candidate.name).slice(0,60),url:candidate.introUrl}]);
+    if(config.buttons.contact&&url)row.push({text:('Написать '+candidate.name).slice(0,60),url});
+    if(config.buttons.intro&&candidate.introUrl)row.push({text:row.length?'Интро':('Интро: '+candidate.name).slice(0,60),url:candidate.introUrl});
+    if(row.length)keyboard.inline_keyboard.push(row);
   });
+  const navigation:TelegramInlineKeyboard['inline_keyboard'][number]=[];
+  if(request.hasPrevious)navigation.push({text:'Назад',callback_data:`cb:prev:${request.id}:${request.pageVersion??0}`});
+  if(request.hasMore)navigation.push({text:candidates.length?'Показать ещё':'Продолжить поиск',callback_data:`cb:more:${request.id}:${request.pageVersion??0}`});
+  if(navigation.length)keyboard.inline_keyboard.push(navigation);
+  if(isGroup&&request.hasMore&&request.privateUrl)keyboard.inline_keyboard.push([{text:'Продолжить в личке',url:request.privateUrl}]);
   if(config.buttons.refine)keyboard.inline_keyboard.push([{text:'Уточнить подбор',callback_data:`cb:r:${request.id}:0`},...(candidates.length?[{text:'Не подходит',callback_data:`cb:f:${request.id}:0`}]:[])]);
   if(config.buttons.refine&&candidates.length)keyboard.inline_keyboard.push([{text:'Полезный подбор',callback_data:`cb:good:${request.id}:0`}]);
   const blocks:PostBlock[]=[];
@@ -44,14 +53,10 @@ export async function emptyMatchText(managerId:string,userId:string,publicOnly:b
 
 /** All Collaber messages share CM limits, pause checks, subscription accounting and journal. */
 export async function deliverMessage(managerId:string,chatId:string,text:string,keyboard?:TelegramInlineKeyboard,key?:string,html?:string,replyId?:number,initiative=false,beforeDispatch?:()=>Promise<void>){
-  const lockKey='delivery-lock:'+managerId;
-  await prisma.collaberTask.upsert({where:{dedupeKey:lockKey},create:{communityManagerId:managerId,dedupeKey:lockKey,kind:'LOCK',status:'IDLE',payload:{}},update:{}});
-  const claim=await prisma.collaberTask.updateMany({where:{dedupeKey:lockKey,OR:[{status:'IDLE'},{leaseUntil:{lt:new Date()}}]},data:{status:'LOCKED',leaseUntil:new Date(Date.now()+5*60000)}});
-  if(!claim.count)throw new Error('Другая отправка CM ещё выполняется. Повторите позже.');
-  try{return await deliverMessageLocked(managerId,chatId,text,keyboard,key,html,replyId,initiative,beforeDispatch)}
-  finally{await prisma.collaberTask.update({where:{dedupeKey:lockKey},data:{status:'IDLE',leaseUntil:null}})}
+  return withCollaberDeliveryLock(managerId,()=>deliverMessageLocked(managerId,chatId,text,keyboard,key,html,replyId,initiative,beforeDispatch));
 }
-async function deliverMessageLocked(managerId:string,chatId:string,text:string,keyboard?:TelegramInlineKeyboard,key?:string,html?:string,replyId?:number,initiative=false,beforeDispatch?:()=>Promise<void>){
+export
+async function deliverMessageLocked(managerId:string,chatId:string,text:string,keyboard?:TelegramInlineKeyboard,key?:string,html?:string,replyId?:number,initiative=false,beforeDispatch?:()=>Promise<void>,editMessageId?:number){
   const ctx=await collaberContext(managerId);if(!ctx?.manager.enabled||!ctx.config.features.collaber.enabled||!ctx.ownerId)throw new Error('Collaber на паузе');
   if(initiative&&isQuietHour(ctx.config))throw new Error('Сейчас тихие часы');
   if(initiative){
@@ -70,12 +75,19 @@ async function deliverMessageLocked(managerId:string,chatId:string,text:string,k
     if(!current?.manager.enabled||!current.config.features.collaber.enabled||current.manager.publishedVersion!==ctx.manager.publishedVersion)throw new Error('Настройки изменились, повторите действие');
     await beforeDispatch?.();
     dispatched=true;
-    const ref=html?await sendRichMessage(chatId,html,executor.token,keyboard,replyId):await sendBotMessage(chatId,text,executor.token,keyboard,undefined,replyId);
+    let ref;
+    if(editMessageId){
+      try{await telegramAction('editMessageText',{chat_id:chatId,message_id:editMessageId,...(html?{rich_message:{html}}:{text}),reply_markup:keyboard??{inline_keyboard:[]}},executor.token)}
+      catch(error){if(!(error instanceof TelegramApiError&&error.code===400&&/message is not modified/i.test(error.message)))throw error}
+      ref={chatId:Number(chatId),messageId:editMessageId};
+    }else ref=html?await sendRichMessage(chatId,html,executor.token,keyboard,replyId):await sendBotMessage(chatId,text,executor.token,keyboard,undefined,replyId);
     if(!ref)throw new Error('Telegram не подтвердил идентификатор сообщения');
-    await prisma.communityManagerAction.update({where:{id:action.id},data:{decision:'RESPOND',status:'COMPLETED',telegramMessageId:ref.messageId}});
-    await prisma.communityManager.update({where:{id:managerId},data:{lastActionAt:new Date(),lastHealthyAt:new Date()}});
+    // A confirmed Telegram result must survive a transient receipt-write failure.
+    for(let attempt=0;;attempt++)try{await prisma.communityManagerAction.update({where:{id:action.id},data:{decision:'RESPOND',status:'COMPLETED',telegramMessageId:ref.messageId}});break}catch(error){if(attempt>=2)throw error}
+    await prisma.communityManager.update({where:{id:managerId},data:{lastActionAt:new Date(),lastHealthyAt:new Date()}}).catch(()=>undefined);
     return ref;
   }catch(error){
+    if(editMessageId&&error instanceof TelegramApiError&&error.code)dispatched=false;
     if(!dispatched)await refundSubscriptionQuota(ctx.ownerId,'communityManagerActions');
     if(action)await prisma.communityManagerAction.update({where:{id:action.id},data:{decision:'ERROR',status:dispatched?'UNCERTAIN':'FAILED',error:dispatched?'Проверьте доставку в Telegram перед повтором':'Отправка отменена до обращения к Telegram'}});
     if(error&&typeof error==='object')Object.assign(error,{collaberDispatched:dispatched});
@@ -83,33 +95,5 @@ async function deliverMessageLocked(managerId:string,chatId:string,text:string,k
   }
 }
 export async function deliverMatch(requestId:string,managerId:string,approved=false){
-  const request=await prisma.collaberRequest.findFirst({where:{id:requestId,communityManagerId:managerId}});
-  if(!request||!['READY','DRAFT'].includes(request.status))return;
-  const ctx=await collaberContext(managerId);if(!ctx||!ctx.manager.enabled||!ctx.config.features.collaber.enabled)throw new Error('Collaber на паузе');
-  const cfg=ctx.config.features.collaber;
-  if(request.initiative){
-    if(cfg.initiatives==='off'||(!approved&&cfg.initiatives!=='auto'))return;
-    const count=await prisma.collaberRequest.count({where:{communityManagerId:managerId,initiative:true,status:{in:['SENDING','SENT','UNCERTAIN']},updatedAt:{gte:new Date(Date.now()-86400000)}}});
-    if(count>=cfg.maxInitiativesPerDay||isQuietHour(ctx.config))return;
-    const state=await prisma.communityManagerConversationState.findUnique({where:{communityManagerId:managerId}});
-    // A reply to an intro belongs to that conversation; only standalone initiatives wait for silence.
-    if(!request.sourceMessageId&&state?.lastHumanAt&&state.lastHumanAt>new Date(Date.now()-ctx.config.replies.ambientCooldownMinutes*60000))return;
-    if(state?.pendingModeratorAt&&state.pendingModeratorAt>new Date(Date.now()-30*60000))return;
-    const activity=await prisma.communityManagerActivity.findFirst({where:{communityManagerId:managerId,status:{in:['PROCESSING','RUNNING','SENDING','ACTIVE']}}});if(activity)return;
-  }else if(!cfg.onDemand)return;
-  const candidates=(await refreshCandidates(managerId,request.tgUserId,request.candidates,request.chatId.startsWith('-'))).slice(0,request.chatId.startsWith('-')?2:3);
-  if(request.initiative&&!candidates.length){await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'NO_MATCH',candidates:[]}});return}
-  const claim=await prisma.collaberRequest.updateMany({where:{id:requestId,status:request.status},data:{status:'SENDING',candidates:candidates as any}});if(!claim.count)return;
-  const presentation=matchPresentation({...request,candidates},cfg,candidates.length?undefined:await emptyMatchText(managerId,request.tgUserId,request.chatId.startsWith('-')));
-  try{
-    const ref=await deliverMessage(managerId,request.chatId,presentation.text,presentation.keyboard,request.id,presentation.html,request.sourceMessageId??undefined,request.initiative,async()=>{
-      await memberAccess(managerId,request.tgUserId);
-      const current=await prisma.collaberRequest.findUnique({where:{id:request.id}});
-      const eligible=await prisma.collaberProfile.findMany({where:{communityManagerId:managerId,id:{in:candidates.map(c=>c.id)},searchable:true,forgotten:false,...(request.chatId.startsWith('-')?{publicMentions:true}:{})}});
-      if(current?.status!=='SENDING'||eligible.length!==candidates.length||candidates.some(c=>!eligible.some(p=>p.id===c.id&&profileRevision(p)===c.profileRevision)))throw new Error('Состав или видимость участников изменились. Повторите подбор.');
-      if(request.initiative&&!await prisma.collaberProfile.findFirst({where:{communityManagerId:managerId,tgUserId:request.tgUserId,searchable:true,publicMentions:true,forgotten:false}}))throw new Error('Участник отозвал согласие на рекомендации');
-    });
-    await prisma.collaberRequest.update({where:{id:requestId},data:{status:'SENT',telegramMessageId:ref.messageId,response:presentation.text}});
-    await prisma.collaberProfile.updateMany({where:{id:{in:candidates.map(c=>c.id)},communityManagerId:managerId},data:{lastProposedAt:new Date()}});
-  }catch(error){const uncertain=Boolean((error as any)?.collaberDispatched);await prisma.collaberRequest.updateMany({where:{id:requestId,status:'SENDING'},data:{status:uncertain?'UNCERTAIN':request.status,error:uncertain?'Проверьте журнал и чат перед повтором отправки':error instanceof Error?error.message:'Отправка отложена'}});throw error}
+  return deliverInitialMatch(requestId,managerId,approved);
 }

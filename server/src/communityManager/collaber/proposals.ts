@@ -18,7 +18,7 @@ export async function propose(managerId:string,userId:string,key:string,sourceMe
   const query=introQuery(profile.facts,ctx.config.features.collaber.goals,Boolean(sourceMessageId));if(!query)return;
   const recent=await prisma.collaberRequest.findFirst({where:{communityManagerId:managerId,tgUserId:userId,initiative:true,createdAt:{gt:new Date(Date.now()-86400000)}}});if(recent)return;
   const request=await createMatch({managerId,userId,chatId:ctx.chatId,query,dedupeKey:managerId+':'+userId+':'+key,initiative:true,sourceMessageId});
-  if(!Array.isArray(request.candidates)||!request.candidates.length){await prisma.collaberRequest.update({where:{id:request.id},data:{status:'NO_MATCH'}});return}
+  if((!Array.isArray(request.candidates)||!request.candidates.length)&&request.poolExhausted){await prisma.collaberRequest.update({where:{id:request.id},data:{status:'NO_MATCH'}});return}
   if(ctx.config.features.collaber.initiatives==='auto')await deliverMatch(request.id,managerId);
 }
 

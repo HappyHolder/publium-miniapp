@@ -5,12 +5,14 @@ import { isQuietHour } from '../config';
 import { activeFacts, preferenceCommand, type IntroMessage } from './domain';
 import { processTelegramTask, retiredIntroductionCallback } from './telegram';
 import { deliverMatch } from './delivery';
+import { recoverMatchPages } from './pages';
 
 let running=false, lastPeriodic=0, lastDeliveryRetry=0;
 export async function processCollaberJobs(){
   if(running)return;running=true;
   try{
     const now=new Date();
+    await recoverMatchPages();
     await prisma.collaberTask.updateMany({where:{status:'PROCESSING',leaseUntil:{lt:now}},data:{status:'PENDING',leaseUntil:null}});
     await prisma.collaberImport.updateMany({where:{status:'PROCESSING',leaseUntil:{lt:now}},data:{status:'PENDING',leaseUntil:null}});
     await prisma.collaberRequest.updateMany({where:{status:'SENDING',updatedAt:{lt:new Date(Date.now()-10*60000)}},data:{status:'UNCERTAIN',error:'Обработка прервалась. Проверьте доставку.'}});

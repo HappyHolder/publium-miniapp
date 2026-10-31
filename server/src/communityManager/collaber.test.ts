@@ -124,9 +124,9 @@ test('rich result keeps names, description and reason in separate paragraphs',()
 test('group results can be configured as short, image-free replies with only intro buttons',()=>{
  const candidate={id:'p',tgUserId:'42',name:'Анна <b>',username:'test',description:'Дополнительно: интеграция',reason:'Причина',evidence:'Предлагаю помощь с интеграцией API. '.repeat(25),at:message.at,introUrl:'https://t.me/c/123/17'};
  const config={...DEFAULT_COLLABER,introduction:'',showImage:false,imageUrl:'https://example.com/cover.png',buttons:{contact:false,intro:true,refine:false}};
- const result=matchPresentation({id:'r',chatId:'-100123',query:'интеграция',candidates:[candidate,candidate,candidate]},config);
- assert.ok(!result.html.includes('cover.png'));assert.ok(result.text.length<600);assert.ok(!result.text.includes('Источник:'));
- assert.equal(result.keyboard.inline_keyboard.length,2);
+ const result=matchPresentation({id:'r',chatId:'-100123',query:'интеграция',candidates:Array.from({length:7},(_,i)=>({...candidate,id:'p'+i}))},config);
+ assert.ok(!result.html.includes('cover.png'));assert.ok(result.text.length<850);assert.ok(!result.text.includes('Источник:'));
+ assert.equal(result.keyboard.inline_keyboard.length,5);
  assert.ok(result.keyboard.inline_keyboard.every(row=>row.length===1&&row[0].text.startsWith('Интро:')));
  assert.ok(result.html.includes('&lt;b&gt;'));
  const empty=matchPresentation({id:'r',chatId:'-100123',query:'задача',candidates:[]},config);
@@ -134,15 +134,15 @@ test('group results can be configured as short, image-free replies with only int
 });
 test('group presentation honors saved cover, introduction and every button switch',()=>{
  const candidate={id:'p',tgUserId:'42',name:'Анна',username:'example_user',description:'Интеграция',reason:'Причина',evidence:'Подключаю API.',at:message.at,introUrl:'https://t.me/c/123/17'};
- const request={id:'r',chatId:'-100123',query:'интеграция',candidates:[candidate,candidate,candidate]};
+ const request={id:'r',chatId:'-100123',query:'интеграция',candidates:Array.from({length:7},(_,i)=>({...candidate,id:'p'+i}))};
  const config={...DEFAULT_COLLABER,showImage:true,imageUrl:'https://example.com/cover.png',introduction:'<Наш подбор>',buttons:{contact:true,intro:true,refine:true}};
  const full=matchPresentation(request,config);
  assert.ok(full.html.includes('cover.png'));assert.ok(full.html.includes('&lt;Наш подбор&gt;'));assert.ok(full.text.startsWith(config.introduction));
- assert.equal(full.keyboard.inline_keyboard.length,6);
- assert.deepEqual(full.keyboard.inline_keyboard.slice(0,2).map(row=>row[0].text),['Написать Анна','Интро: Анна']);
+ assert.equal(full.keyboard.inline_keyboard.length,7);
+ assert.deepEqual(full.keyboard.inline_keyboard[0].map(b=>b.text),['Написать Анна','Интро']);
  for(const key of ['contact','intro','refine'] as const){
   const only=matchPresentation(request,{...config,buttons:{contact:false,intro:false,refine:false,[key]:true}});
-  assert.equal(only.keyboard.inline_keyboard.length,2);
+  assert.equal(only.keyboard.inline_keyboard.length,key==='refine'?2:5);
   const prefix={contact:'Написать',intro:'Интро:',refine:'Уточнить подбор'}[key];
   assert.ok(only.keyboard.inline_keyboard[0][0].text.startsWith(prefix));
  }
