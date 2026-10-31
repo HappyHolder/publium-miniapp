@@ -384,6 +384,49 @@ try{
  ai.collaberJson=originalInference;
  console.log('PASS natural group search renders one card with verified intro link; deduplication, normal chat, human reply exclusion, clarification follow-up and self exclusion');
 
+ // Reproduce a search being incorrectly treated as the author's intro.
+ const {afterLiveIntro,sendConsentPrompt}=require('../dist/communityManager/collaber/proposals.js');
+ const {processCommunityManagerJobs}=require('../dist/communityManager/engine.js');
+ const agent=require('../dist/communityManager/agentRuntime.js'),originalAgent=agent.runCommunityManagerAgent;
+ const beforeSearchProfile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:manager.id,tgUserId:'42'}}});
+ const searchText='Ищу разработчика по созданию мини-приложения';
+ const searchMessage={...intro,id:'9400',userId:'940',sourceChatId:chat.tgChatId,text:searchText,at:new Date().toISOString()};
+ const beforeIntroTasks=await prisma.collaberTask.count({where:{communityManagerId:manager.id,kind:'INTRO'}});
+ assert.equal(await ingestIntro(manager.id,searchMessage,config.features.collaber,false,true),false);
+ assert.equal(await ingestIntro(manager.id,{...searchMessage,userId:'42'},config.features.collaber,false,true),false);
+ await queueLiveIntro(manager.id,{telegramMessageId:9400,tgUserId:'940',text:searchText,createdAt:new Date()});
+ await afterLiveIntro(manager.id,searchMessage);
+ assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,kind:'INTRO'}}),beforeIntroTasks);
+ assert.equal(await prisma.collaberProfile.count({where:{communityManagerId:manager.id,tgUserId:'940'}}),0);
+ assert.deepEqual(await prisma.collaberProfile.findUnique({where:{id:beforeSearchProfile.id}}),beforeSearchProfile);
+ // A stale consent job for an already misclassified search must not send a new prompt.
+ const stalePerson=await prisma.communityManagerParticipant.create({data:{communityManagerId:manager.id,tgUserId:'942',displayName:'Synthetic legacy search'}});
+ const staleProfile=await prisma.collaberProfile.create({data:{communityManagerId:manager.id,participantId:stalePerson.id,tgUserId:'942',sourceText:searchText,sourceAt:new Date(),sourceMessageId:9420}});
+ const staleConsent=await prisma.collaberTask.create({data:{communityManagerId:manager.id,kind:'CONSENT',status:'WAITING',dedupeKey:'consent:'+manager.id+':942',payload:{userId:'942',sourceMessageId:9420,sourceChatId:chat.tgChatId}}});
+ const beforeStalePrompt=sends;await sendConsentPrompt({id:'stale-search-consent-'+tag,communityManagerId:manager.id,payload:{userId:'942',consentId:staleConsent.id}});assert.equal(sends,beforeStalePrompt);
+ await prisma.collaberProfile.delete({where:{id:staleProfile.id}});
+ const introOnlyNeed={...searchMessage,id:'9410',userId:'941',text:'#intro '+searchText};
+ assert.equal(await ingestIntro(manager.id,introOnlyNeed,config.features.collaber,false,true),true);
+ await prisma.collaberProfile.deleteMany({where:{communityManagerId:manager.id,tgUserId:'941'}});
+ const ambientBefore=config.replies.ambientConversation;config.replies.ambientConversation=false;await saveConfig();
+ await prisma.communityManagerConversationState.upsert({where:{communityManagerId:manager.id},create:{communityManagerId:manager.id},update:{}});
+ agent.runCommunityManagerAgent=async()=>{throw new Error('Explicit searches must not fall through to the conversational agent')};
+ try{
+  for(const [index,text] of ['Ищу разработчика',searchText,'Ищу разработчика для моего проекта. Мой проект — Telegram Mini App.'].entries()){
+   const source=await prisma.communityManagerMessage.create({data:{communityManagerId:manager.id,telegramUpdateId:'search-not-intro-'+tag+'-'+index,telegramMessageId:9401+index,tgChatId:chat.tgChatId,tgUserId:'940',text,expiresAt:new Date(Date.now()+86400000)}});
+   const job=await prisma.communityManagerJob.create({data:{communityManagerId:manager.id,messageId:source.id}});
+   await processCommunityManagerJobs();
+   const complete=await prisma.communityManagerJob.findUnique({where:{id:job.id}});assert.equal(complete.status,'COMPLETED',complete.lastError);
+   assert.ok(await prisma.collaberRequest.findFirst({where:{communityManagerId:manager.id,tgUserId:'940',sourceMessageId:source.telegramMessageId,initiative:false}}));
+   assert.equal(await prisma.collaberProfile.count({where:{communityManagerId:manager.id,tgUserId:'940'}}),0);
+   assert.equal(await prisma.collaberTask.count({where:{communityManagerId:manager.id,kind:'INTRO'}}),beforeIntroTasks);
+   // Edits of a routed search are not a source for a profile, even with self-description words.
+   assert.equal(await ingestIntro(manager.id,{...searchMessage,id:String(source.telegramMessageId),text:'Мой проект — Mini App. Ищу разработчика.',at:new Date().toISOString()},config.features.collaber,false,true),false);
+  }
+ }finally{agent.runCommunityManagerAgent=originalAgent;config.replies.ambientConversation=ambientBefore;await saveConfig()}
+ console.log('PASS standalone and compound developer searches route before extraction, do not overwrite profiles or ask public consent; explicit tagged intros still save');
+
+
  await prisma.communityManager.update({where:{id:manager.id},data:{enabled:false}});
  await assert.rejects(createMatch({managerId:manager.id,userId:'43',chatId:chat.tgChatId,query:'маркетинг',dedupeKey:'paused-'+tag}),/выключен/);
  const beforePrivacy=sends;telegram.getChatMember=async()=>({status:'left',user:{id:44}});

@@ -36,7 +36,9 @@ export function preferenceCommand(text:string):'hide'|'show'|'forget'|'no_mentio
 // Relay announcements describe a subject, not their sender. Exports often omit
 // is_bot, so do not let an intro tag turn the relay account into that person.
 export function isThirdPartyIntro(text:string){return /^[^\n]{1,200}\s+has joined the chat!\s*(?:\n|$)/iu.test(text.trim())||(/^[^\n]*Что обсуждалось вчера\s+\d/iu.test(text.trim())&&/#dailysummary\b/iu.test(text))}
-export function possibleIntro(text:string){return !isThirdPartyIntro(text)&&text.length>=25 && /(?:#интро|#intro|меня зовут|занимаюсь|разрабатыва(?:ю|ем)|основатель|мой проект|наш проект|ищу|предлагаю|могу помочь|больше не ищу|уже наш[её]л|i am|i'm|looking for|founder|my project|(?:^|\n)\s*(?:я\s+)?(?:CEO|СЕО|CTO|фаундер)(?=\s|[,:—–-]|$))/imu.test(text)}
+// A search describes the requested person, not the author's own profile.
+// An explicit intro tag or self-description still permits needs within an intro.
+export function possibleIntro(text:string){return !isThirdPartyIntro(text)&&text.length>=25 && /(?:#интро|#intro|меня зовут|занимаюсь|разрабатыва(?:ю|ем)|основатель|мой проект|наш проект|предлагаю|могу помочь|больше не ищу|уже наш[её]л|i am(?!\s+looking\s+for)|i'm(?!\s+looking\s+for)|founder|my project|(?:^|\n)\s*(?:я\s+)?(?:CEO|СЕО|CTO|фаундер)(?=\s|[,:—–-]|$))/imu.test(text)}
 export function validateFacts(value:unknown, source:IntroMessage, freshnessDays:number):Fact[]{
   if(!Array.isArray(value))return[];
   return value.slice(0,12).flatMap(f=>{

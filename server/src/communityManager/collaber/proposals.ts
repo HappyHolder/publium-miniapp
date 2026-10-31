@@ -1,7 +1,7 @@
 import { prisma } from '../../db';
 import { collaberContext, createMatch, enqueueCollaber } from './service';
 import { deliverMatch, deliverMessage } from './delivery';
-import { activeFacts, type IntroMessage } from './domain';
+import { activeFacts, possibleIntro, type IntroMessage } from './domain';
 
 export function introQuery(facts:unknown,goals:string,fromIntro:boolean){
   const active=activeFacts(facts);
@@ -24,6 +24,7 @@ export async function propose(managerId:string,userId:string,key:string,sourceMe
 
 /** One explicit public-visibility choice per participant, replying to their own intro. */
 export async function afterLiveIntro(managerId:string,message:IntroMessage){
+  if(!possibleIntro(message.text))return;
   const ctx=await collaberContext(managerId);if(!ctx||ctx.config.features.collaber.initiatives==='off')return;
   const profile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}}});
   if(!profile?.searchable||profile.forgotten)return;
@@ -39,7 +40,7 @@ export async function sendConsentPrompt(task:{id:string;communityManagerId:strin
   const ctx=await collaberContext(managerId);if(!ctx||ctx.config.features.collaber.initiatives==='off')return;
   const consent=await prisma.collaberTask.findFirst({where:{id:p.consentId,communityManagerId:managerId,status:'WAITING'}});
   const profile=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:p.userId}}});
-  if(!consent||!profile?.searchable||profile.forgotten||profile.publicMentions)return;
+  if(!consent||!profile?.searchable||profile.forgotten||profile.publicMentions||!possibleIntro(profile.sourceText))return;
   const sourceMessageId=(consent.payload as {sourceMessageId:number}).sourceMessageId;
   await deliverMessage(managerId,ctx.chatId,'Интро сохранено для личного подбора. Можно рекомендовать тебя и в группе? /hide — скрыть профиль.',{inline_keyboard:[[{text:'Да, в группе',callback_data:'cp:'+profile.id+':public'},{text:'Только лично',callback_data:'cp:'+profile.id+':private'}]]},task.id,undefined,sourceMessageId,false,async()=>{
     const current=await prisma.collaberProfile.findUnique({where:{id:profile.id}});

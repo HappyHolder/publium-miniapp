@@ -4,7 +4,7 @@ import { queueLiveIntro } from './collaber/service';
 import { preferenceCommand } from './collaber/domain';
 import { processCollaberJobs } from './collaber/worker';
 import { deliverMatch } from './collaber/delivery';
-import { handleGroupCollaborationQuery } from './collaber/routing';
+import { handleGroupCollaborationQuery, explicitCollaborationSearch } from './collaber/routing';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { env } from '../env';
@@ -163,7 +163,7 @@ async function processJob(job:any){
     await done(job.id,'SKIPPED');return;
   }
   await prisma.communityManagerMessage.update({where:{id:m.id},data:{moderationStatus:'ALLOWED'}});
-  if(ctx.config.features.collaber.enabled&&(preferenceCommand(m.text??'')||(ctx.config.features.collaber.collectIntros&&ctx.config.replies.conversationMemory)))await queueLiveIntro(ctx.manager.id,m);
+  const collectIntro=async()=>{if(ctx.config.features.collaber.enabled&&(preferenceCommand(m.text??'')||(ctx.config.features.collaber.collectIntros&&ctx.config.replies.conversationMemory)))await queueLiveIntro(ctx.manager.id,m)};
   const location=await resolveConversationLocation(ctx.manager.id,m),executor=await communityManagerExecutor(ctx.community.id);
   const burst=m.tgUserId?await prisma.communityManagerMessage.findMany({where:{communityManagerId:ctx.manager.id,tgUserId:m.tgUserId,replyToMessageId:m.replyToMessageId??null,createdAt:{gte:new Date(m.createdAt.getTime()-20000),lte:m.createdAt}},orderBy:{createdAt:'asc'},take:6,select:{text:true}}):[];
   const text=(burst.map((row:any)=>row.text).filter(Boolean).join('\n')||m.text||'').slice(0,12000),mention=mentionsTelegramUsername(text,executor.username);
@@ -172,10 +172,11 @@ async function processJob(job:any){
   const participant=m.tgUserId?await prisma.communityManagerParticipant.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:ctx.manager.id,tgUserId:m.tgUserId}}}):null;
   const targetPerson=repliedHuman?.tgUserId?await prisma.communityManagerParticipant.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:ctx.manager.id,tgUserId:repliedHuman.tgUserId}},select:{displayName:true,username:true,tgUserId:true}}):null;
   const addressedToOtherHuman=Boolean(repliedHuman?.tgUserId&&repliedHuman.tgUserId!==m.tgUserId),socialAddress=isAddressedToCommunityManager(text,ctx.config,!addressedToOtherHuman),addressedToManager=Boolean(mention||repliedAction||socialAddress);
+  const directSearch=ctx.config.features.collaber.enabled&&ctx.config.features.collaber.onDemand&&explicitCollaborationSearch(text)&&!addressedToOtherHuman;
   const replyTarget=repliedAction?(ctx.config.identity.displayName||'КМ'):targetPerson?participantLabel(targetPerson):null;
-  const blockedPath=(repliedAction&&!ctx.config.replies.replyToDirectReply)?'direct replies disabled':(mention&&!ctx.config.replies.replyToMention)?'mentions disabled':(!addressedToManager&&!ctx.config.replies.ambientConversation)?'ambient participation disabled':(addressedToOtherHuman&&!ctx.config.replies.thematicConversation)?'thematic participation disabled':null;
-  if(blockedPath){await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'SKIPPED'}});await log(ctx,m,'SILENT','configured_reply_policy',1,blockedPath,start,undefined,[],{input:0,output:0},undefined,undefined,{threadId:location.threadId,segmentId:location.segmentId});await done(job.id,'SKIPPED');return}
-  if(!addressedToManager&&ctx.config.replies.ambientCooldownMinutes>0){const recentAmbient=await prisma.communityManagerAction.findFirst({where:{communityManagerId:ctx.manager.id,decision:'RESPOND',createdAt:{gte:new Date(Date.now()-ctx.config.replies.ambientCooldownMinutes*60_000)},metadata:{path:['addressedToManager'],equals:false}},select:{id:true}});if(recentAmbient){await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'SKIPPED'}});await log(ctx,m,'SILENT','ambient_cooldown',1,'Ambient cooldown is active',start,undefined,[],{input:0,output:0},undefined,undefined,{threadId:location.threadId,segmentId:location.segmentId});await done(job.id,'SKIPPED');return}}
+  const blockedPath=(repliedAction&&!ctx.config.replies.replyToDirectReply)?'direct replies disabled':(mention&&!ctx.config.replies.replyToMention)?'mentions disabled':(!addressedToManager&&!directSearch&&!ctx.config.replies.ambientConversation)?'ambient participation disabled':(addressedToOtherHuman&&!ctx.config.replies.thematicConversation)?'thematic participation disabled':null;
+  if(blockedPath){await collectIntro();await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'SKIPPED'}});await log(ctx,m,'SILENT','configured_reply_policy',1,blockedPath,start,undefined,[],{input:0,output:0},undefined,undefined,{threadId:location.threadId,segmentId:location.segmentId});await done(job.id,'SKIPPED');return}
+  if(!addressedToManager&&!directSearch&&ctx.config.replies.ambientCooldownMinutes>0){const recentAmbient=await prisma.communityManagerAction.findFirst({where:{communityManagerId:ctx.manager.id,decision:'RESPOND',createdAt:{gte:new Date(Date.now()-ctx.config.replies.ambientCooldownMinutes*60_000)},metadata:{path:['addressedToManager'],equals:false}},select:{id:true}});if(recentAmbient){await collectIntro();await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'SKIPPED'}});await log(ctx,m,'SILENT','ambient_cooldown',1,'Ambient cooldown is active',start,undefined,[],{input:0,output:0},undefined,undefined,{threadId:location.threadId,segmentId:location.segmentId});await done(job.id,'SKIPPED');return}}
   const priorState=await prisma.communityManagerConversationState.findUnique({where:{communityManagerId:ctx.manager.id},select:{internalState:true}});
   const personal=evolvePersonalState(priorState?.internalState,ctx.config,{direct:addressedToManager,question:/[?？]\s*$/.test(text),conflict:/(?:дурак|идиот|тупой|заткнись|fuck|stupid)/iu.test(text)});
   await prisma.communityManagerConversationState.update({where:{communityManagerId:ctx.manager.id},data:{internalState:{personal} as any,lastAnalyzedAt:new Date(),messagesSinceAnalysis:0}});
@@ -183,6 +184,8 @@ async function processJob(job:any){
     if(m.tgUserId&&await handleGroupCollaborationQuery({managerId:ctx.manager.id,chatId:m.tgChatId,userId:m.tgUserId,messageId:m.telegramMessageId,eventKey:m.id,text,addressedToManager,addressedToOtherHuman,replyToMessageId:m.replyToMessageId??undefined})){
       await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'PROCESSED'}});await done(job.id,'COMPLETED');return;
     }
+    // Route searches before any profile extraction; both workers can otherwise run concurrently.
+    await collectIntro();
     const result=await runCommunityManagerAgent({managerId:ctx.manager.id,communityId:ctx.community.id,channelId:ctx.community.channelId,channelName:contextName(ctx.community),chatId:m.tgChatId,config:ctx.config,sessionKey:conversationSessionKey(location.threadId,location.segmentId),threadId:location.threadId,segmentId:location.segmentId,event:{kind:'HUMAN_MESSAGE',dedupeKey:'human:'+ctx.manager.id+':'+m.id,sourceMessageId:m.id,currentText:text,currentTelegramMessageId:m.telegramMessageId,currentAuthorId:m.tgUserId??undefined,currentAuthor:participantLabel(participant),replyTarget:replyTarget??undefined,replyTargetMessageId:m.replyToMessageId??undefined,addressedToManager,addressedToOtherHuman}});
     if(result.collaberRequestId){await deliverMatch(result.collaberRequestId,ctx.manager.id);await prisma.communityManagerMessage.update({where:{id:m.id},data:{status:'PROCESSED'}});await done(job.id,'COMPLETED');return}
     const decision=result.decision,humanQuestion=/[?？]\s*$/.test(text),unansweredQuestion=decision.action==='no_action'&&humanQuestion,nextLocation=await applyConversationAnalysis(ctx.manager.id,m.id,location,{topicKey:decision.topicKey||'conversation',sameSegment:decision.sameConversation,expectsReply:unansweredQuestion,conversationComplete:unansweredQuestion?false:decision.conversationComplete,newContribution:text,speechAct:humanQuestion?'question':'other',possibleClaims:decision.memoryUpdates.map(item=>({kind:item.kind,value:item.value,confidence:item.confidence}))},m.createdAt);

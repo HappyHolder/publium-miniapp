@@ -21,6 +21,13 @@ test('untagged team-development intros reach extraction',()=>{
  assert.equal(possibleIntro('Уверен, что любой CEO знает эту шутку про зарплаты.'),false);
  assert.equal(possibleIntro('Всем привет!\nФаундер Example. Буду рад совместным проектам.'),true);
 });
+
+test('standalone searches do not become intros, while deliberate intros retain needs',()=>{
+ for(const text of ['Ищу разработчика','Ищу разработчика по созданию мини-приложения','Ищу маркетолога для продвижения проекта','Looking for a Telegram Mini App developer','I am looking for a developer for a mini app',"I'm looking for a developer for a mini app"]){
+  assert.equal(possibleIntro(text),false,text);
+ }
+ for(const text of ['#intro Ищу разработчика по созданию мини-приложения','Меня зовут Анна. Ищу разработчика для своего приложения.','Я занимаюсь маркетингом. Ищу проекты в TON для продвижения.','I am a developer looking for new projects.','Больше не ищу разработчика, задачу уже закрыл.'])assert.equal(possibleIntro(text),true,text);
+});
 test('historical offers remain searchable but require confirmation and cannot trigger a fresh initiative',()=>{
  const old={...message,at:'2024-06-01T00:00:00.000Z',text:'Предлагаю разработку приложений и маркетинг.'};
  const facts=validateFacts([{kind:'offer',value:old.text,evidence:old.text}],old,90);

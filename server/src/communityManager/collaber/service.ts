@@ -55,6 +55,8 @@ export async function ingestIntro(managerId:string,message:IntroMessage,config:C
   if(command){if(live||manual)await profilePreference(managerId,message.userId,command);return false}
   if(await prisma.collaberTask.findUnique({where:{dedupeKey:'forget:'+managerId+':'+message.userId}}))return false;
   if(!manual&&!possibleIntro(message.text))return false;
+  // An edited or previously queued search must not replace the author's real intro.
+  if(!manual&&message.sourceChatId&&await prisma.collaberRequest.findFirst({where:{communityManagerId:managerId,chatId:message.sourceChatId,sourceMessageId:Number(message.id),initiative:false},select:{id:true}}))return false;
   const existing=await prisma.collaberProfile.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}}});
   if(existing?.forgotten||(!manual&&existing?.reviewedAt&&existing.reviewedAt>=new Date(message.at))||existing?.sourceAt&&existing.sourceAt>new Date(message.at))return false;
   if(existing?.sourceText===message.text&&existing.sourceMessageId===Number(message.id))return false;
@@ -169,6 +171,7 @@ export function liveMessage(m:any):IntroMessage{return {id:String(m.telegramMess
 export async function queueLiveIntro(managerId:string,m:any,moderationAfter?:string){
   if(m.forward_origin||m.forwarded_from||m.messageType==='FORWARDED')return;
   const message=liveMessage(m);
+  if(!preferenceCommand(message.text)&&!possibleIntro(message.text))return;
   const ctx=await collaberContext(managerId);if(ctx)message.sourceChatId=ctx.chatId;
   if(!m.from){const person=await prisma.communityManagerParticipant.findUnique({where:{communityManagerId_tgUserId:{communityManagerId:managerId,tgUserId:message.userId}}});if(person){message.name=person.displayName;message.username=person.username}}
   await enqueueCollaber(managerId,'INTRO','intro:'+managerId+':'+message.id+':'+hash(message.text),{message,...(moderationAfter?{moderationAfter}:{})});
